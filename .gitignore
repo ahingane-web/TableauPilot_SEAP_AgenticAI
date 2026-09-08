@@ -1,0 +1,35 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Vault / local data (encrypted-at-rest credential store, sqlite, sessions)
+data/
+*.sqlite
+*.sqlite-*
+mastra.db*
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.mastra/
+.vite/
+build/
+
+# Test / coverage
+coverage/
+playwright-report/
+test-results/
+.vitest/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.pem
