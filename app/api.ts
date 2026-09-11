@@ -1,14 +1,29 @@
 // Typed API client. Holds only an opaque session id (never a Tableau/LLM secret).
 import type {
+  ColorMapView,
   CreationResult,
   CredentialSummary,
   DatasourceMetadataView,
   EmbedInfo,
+  GrandTotalsView,
   NamedItem,
   PlanningResult,
+  ReferenceLineView,
   SanitizedError,
   SessionContext,
+  TextFormat,
 } from './types';
+
+export interface WorksheetFormatOpts {
+  name: string;
+  referenceLines?: ReferenceLineView[];
+  grandTotals?: GrandTotalsView | null;
+  colorMap?: ColorMapView | null;
+  showLabels?: boolean;
+  titleFormat?: TextFormat | null;
+  /** Field on the color mark ('' clears it). */
+  colorField?: string | null;
+}
 
 const SID_KEY = 'tp_sid';
 
@@ -74,6 +89,10 @@ export const api = {
   session: () => req<SessionContext>('/api/vault/session'),
   saveCredentials: (body: unknown) =>
     req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/credentials', { method: 'POST', body }),
+  getCredentials: () =>
+    req<{ credentialSummary: CredentialSummary | null }>('/api/vault/credentials'),
+  updateCredentials: (body: unknown) =>
+    req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/credentials/update', { method: 'POST', body }),
 
   connect: () => req<{ connected: boolean; siteContentUrl: string; userId: string }>('/api/tableau/connect', { method: 'POST' }),
   projects: () => req<{ items: NamedItem[] }>('/api/tableau/projects'),
@@ -95,10 +114,33 @@ export const api = {
   unlockDatasource: () => req<{ datasourceLock: null }>('/api/tableau/unlock-datasource', { method: 'POST' }),
   context: () => req<SessionContext>('/api/tableau/context'),
 
-  plan: (request: string) => req<PlanningResult>('/api/dashboard/plan', { method: 'POST', body: { request } }),
+  plan: (request: string, workbookName?: string) =>
+    req<PlanningResult>('/api/dashboard/plan', { method: 'POST', body: { request, workbookName } }),
+  /** Chat: revise the current (unpublished) plan via a natural-language instruction. */
+  revisePlan: (instruction: string) =>
+    req<PlanningResult>('/api/dashboard/revise', { method: 'POST', body: { instruction } }),
+  /** Chat: modify an already-published workbook (revise + republish in place). */
+  revisePublished: (instruction: string) =>
+    req<CreationResult>('/api/published/revise', { method: 'POST', body: { instruction } }),
+  setPublishing: (opts: { workbookName?: string; overwrite?: boolean }) =>
+    req<PlanningResult>('/api/dashboard/publishing', { method: 'POST', body: opts }),
+  setSize: (opts: {
+    size: 'automatic' | 'fixed' | 'range';
+    width?: number;
+    height?: number;
+    minWidth?: number;
+    minHeight?: number;
+    maxWidth?: number;
+    maxHeight?: number;
+  }) => req<PlanningResult>('/api/dashboard/size', { method: 'POST', body: opts }),
+  setAppearance: (opts: { backgroundColor?: string; containerBackground?: string; titleFormat?: TextFormat | null }) =>
+    req<PlanningResult>('/api/dashboard/appearance', { method: 'POST', body: opts }),
+  setActions: (opts: { enabled: boolean; runOn?: 'select' | 'hover' | 'menu'; caption?: string; excludeSheets?: string[] }) =>
+    req<PlanningResult>('/api/dashboard/actions', { method: 'POST', body: opts }),
+  setWorksheetFormat: (opts: WorksheetFormatOpts) =>
+    req<PlanningResult>('/api/dashboard/worksheet-format', { method: 'POST', body: opts }),
   approve: (planHash: string) => req<{ approved: boolean; planHash: string }>('/api/dashboard/approve', { method: 'POST', body: { planHash } }),
   execute: () => req<CreationResult>('/api/dashboard/execute', { method: 'POST' }),
 
-  embedInfo: (mode: 'new_workbook' | 'existing_workbook') =>
-    req<EmbedInfo>(`/api/embed/info?mode=${mode}`),
+  embedInfo: () => req<EmbedInfo>('/api/embed/info'),
 };

@@ -111,6 +111,23 @@ export class TableauClient {
     return (await this.parse(res)) as T;
   }
 
+  /**
+   * GET raw bytes under the current site (e.g. downloading datasource / workbook
+   * `content`). Unlike {@link get}, this does NOT JSON-parse the body — it returns the
+   * raw response buffer so callers can unzip a `.tdsx`/`.twbx` or read a `.tds`/`.twb`.
+   */
+  async getBinary(path: string): Promise<Buffer> {
+    // NOTE: Tableau's file-download endpoints (datasource/workbook `content`) reject a
+    // narrow Accept like `application/octet-stream` with HTTP 406 Not Acceptable. They
+    // negotiate on `*/*` and return the file (XML `.tds`/`.twb` or a `.tdsx`/`.twbx` zip).
+    const res = await this.rawFetch(`${this.base()}${path}`, {
+      method: 'GET',
+      headers: this.authHeaders({ Accept: '*/*' }),
+    });
+    const buf = await res.arrayBuffer();
+    return Buffer.from(buf);
+  }
+
   /** POST JSON. */
   async postJson<T = unknown>(path: string, body: unknown): Promise<T> {
     const res = await this.rawFetch(`${this.base()}${path}`, {
@@ -163,16 +180,27 @@ export class TableauClient {
     }
     if (!res.ok) {
       const text = await safeText(res);
-      const detail = extractTableauError(text);
+      const { code, message } = extractTableauError(text);
+      // Log the raw (redacted, truncated) Tableau error body for diagnostics — the
+      // parsed summary/detail sometimes hides useful context (e.g. an internal 500000).
+      log.warn('Tableau responded with an error', {
+        method: init.method,
+        url: stripQuery(url),
+        status: res.status,
+        tableauCode: code,
+        bodyPreview: redactString(text.replace(/\s+/g, ' ').trim().slice(0, 500)),
+      });
       // 401 → session likely expired.
       if (res.status === 401) {
         throw new AppError('AUTH_FAILED', 'Tableau session is invalid or expired.', {
           hint: 'Reconnect to Tableau Cloud.',
-          details: { status: res.status, tableau: detail },
+          details: { status: res.status, tableauCode: code, tableau: message },
         });
       }
-      throw new AppError('TABLEAU_API', `Tableau API error (${res.status}): ${detail}`, {
-        details: { status: res.status },
+      const codeLabel = code ? ` [${code}]` : '';
+      throw new AppError('TABLEAU_API', `Tableau API error (${res.status}${codeLabel}): ${message}`, {
+        hint: hintForTableauError(res.status, code),
+        details: { status: res.status, tableauCode: code },
       });
     }
     return res;
@@ -184,8 +212,23 @@ export class TableauClient {
     try {
       return JSON.parse(text);
     } catch {
-      // Some endpoints return XML even when JSON is requested; surface a sanitized error.
-      throw new AppError('TABLEAU_API', 'Unexpected non-JSON response from Tableau Cloud.');
+      // A 2xx response that isn't JSON is almost always an HTML page (wrong base URL,
+      // an SSO/login wall, or a corporate proxy). Surface enough sanitized context to
+      // diagnose it without leaking anything sensitive.
+      const contentType = res.headers.get('content-type') ?? 'unknown';
+      const looksHtml = /<!doctype html|<html[\s>]/i.test(text);
+      const hint = looksHtml
+        ? 'Tableau returned an HTML page, not the REST API. Check that the Tableau Cloud URL is the base pod URL only — e.g. https://10ax.online.tableau.com — with NO "/#/site/..." path or trailing segments, and that the host is reachable without an SSO/proxy login wall.'
+        : 'The endpoint did not return JSON. Verify the Tableau Cloud URL and TABLEAU_API_VERSION.';
+      throw new AppError('TABLEAU_API', 'Unexpected non-JSON response from Tableau Cloud.', {
+        hint,
+        details: {
+          requestUrl: stripQuery(res.url),
+          status: res.status,
+          contentType,
+          bodyPreview: redactString(text.replace(/\s+/g, ' ').trim().slice(0, 200)),
+        },
+      });
     }
   }
 }
@@ -203,22 +246,53 @@ async function safeText(res: Response): Promise<string> {
   }
 }
 
-/** Extract a human-readable, secret-free error summary from a Tableau error body. */
-function extractTableauError(text: string): string {
-  if (!text) return 'no response body';
+/**
+ * Extract a secret-free error summary AND Tableau's numeric subcode from an error
+ * body. The subcode (e.g. 403011, 403026) is the single most useful field for
+ * diagnosing publish/permission failures, so we surface it explicitly.
+ */
+function extractTableauError(text: string): { code?: string; message: string } {
+  if (!text) return { message: 'no response body' };
   try {
     const json = JSON.parse(text);
     const err = json?.error;
-    if (err?.detail || err?.summary) {
-      return redactString(`${err.summary ?? ''} ${err.detail ?? ''}`.trim());
+    if (err && (err.detail || err.summary || err.code)) {
+      return {
+        code: err.code != null ? String(err.code) : undefined,
+        message: redactString(`${err.summary ?? ''} ${err.detail ?? ''}`.trim()) || 'Tableau error',
+      };
     }
   } catch {
-    // XML fallback
+    // XML fallback: <error code='403011'><summary/><detail/></error>
+    const code = /<error[^>]*\bcode=['"]([^'"]+)['"]/i.exec(text)?.[1];
     const summary = /<summary>([^<]*)<\/summary>/i.exec(text)?.[1];
     const detail = /<detail>([^<]*)<\/detail>/i.exec(text)?.[1];
-    if (summary || detail) return redactString(`${summary ?? ''} ${detail ?? ''}`.trim());
+    if (code || summary || detail) {
+      return {
+        code,
+        message: redactString(`${summary ?? ''} ${detail ?? ''}`.trim()) || 'Tableau error',
+      };
+    }
   }
-  return redactString(text.slice(0, 300));
+  return { message: redactString(text.slice(0, 300)) };
+}
+
+/** Map common Tableau error subcodes to an actionable, secret-free hint. */
+function hintForTableauError(status: number, code?: string): string | undefined {
+  if (status !== 403) return undefined;
+  switch (code) {
+    case '403011':
+      return 'Your account lacks Publish permission on the target project. In Tableau Cloud, open the project ▸ Permissions and grant Workbook ▸ Publish (and check for any explicit Deny).';
+    case '403130':
+      return 'A workbook with this name already exists in the target project. Choose “Overwrite” to replace it, or publish under a different workbook name.';
+    case '403026':
+      return 'A workbook with this name already exists and is owned by another user, so it cannot be overwritten. Publish under a new name, or take ownership / grant Overwrite on the existing workbook.';
+    case '403021':
+    case '403004':
+      return 'You do not have Connect access to the published datasource this workbook references. Open the datasource ▸ Permissions and grant View + Connect (and check for any explicit Deny). Also confirm the datasource is not in Personal Space.';
+    default:
+      return 'Tableau denied this action. Check Permissions on the target project (Workbook ▸ Publish) and the published datasource (View + Connect), including any explicit Deny rules; also confirm the datasource is not in Personal Space and does not require prompted credentials.';
+  }
 }
 
 /** Assemble a multipart/mixed body from parts. */

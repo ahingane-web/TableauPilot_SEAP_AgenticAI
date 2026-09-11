@@ -56,8 +56,12 @@ export interface DatasourceField {
   dataType: string;
   /** True when the field is a date/datetime type. */
   isDate: boolean;
-  /** __typename from the Metadata API (ColumnField, CalculatedField, …). */
+  /** __typename from the Metadata API (ColumnField, CalculatedField, …). For a federated
+   * (DatasourceField) field this is resolved to the upstream remoteField's type. */
   fieldType?: string;
+  /** For a datasource-defined CalculatedField: its Tableau formula (used to DEFINE the
+   * field locally in the generated workbook so the chart renders instead of going blank). */
+  formula?: string;
 }
 
 export interface DatasourceMetadata {
@@ -69,6 +73,8 @@ export interface DatasourceMetadata {
   dates: DatasourceField[];
   /** True when metadata came from the Metadata API; false if it was unavailable. */
   metadataApiAvailable: boolean;
+  /** When unavailable, a sanitized reason (GraphQL/HTTP error or "not indexed"). */
+  unavailableReason?: string;
 }
 
 /** A single capability grant evaluated for the current user. */

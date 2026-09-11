@@ -42,6 +42,50 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Verify a PIN against a vault record, applying lockout/rate-limiting. Returns the
+ * derived vault key on success. Shared by unlock and by credential modification so
+ * both paths enforce the same brute-force protection and behave identically.
+ */
+function verifyPinOrThrow(record: VaultRecord, pin: string): Buffer {
+  const cfg = getConfig().vault;
+  if (record.lockedUntil && record.lockedUntil > Date.now()) {
+    const seconds = Math.ceil((record.lockedUntil - Date.now()) / 1000);
+    throw new AppError('PIN_LOCKED', `Too many attempts. Try again in ${seconds}s.`);
+  }
+  if (!isValidPin(pin)) throw new AppError('VALIDATION', 'PIN must be exactly 6 digits.');
+
+  const key = deriveKey(pin, record.saltHex);
+  if (!checkVerifier(key, record.verifier)) {
+    record.failedAttempts += 1;
+    if (record.failedAttempts >= cfg.maxAttempts) {
+      record.lockedUntil = Date.now() + cfg.lockoutSeconds * 1000;
+      record.failedAttempts = 0;
+      putRecord(record);
+      log.warn('Vault locked after failed attempts', { username: record.username });
+      throw new AppError('PIN_LOCKED', `Too many attempts. Locked for ${cfg.lockoutSeconds}s.`);
+    }
+    putRecord(record);
+    const remaining = cfg.maxAttempts - record.failedAttempts;
+    throw new AppError('AUTH_FAILED', `Incorrect PIN. ${remaining} attempt(s) remaining.`);
+  }
+
+  record.failedAttempts = 0;
+  record.lockedUntil = null;
+  putRecord(record);
+  return key;
+}
+
+/**
+ * Changing credentials invalidates any live Tableau connection and the in-flight
+ * workflow context (project/datasource/plan), since they may no longer apply to the
+ * new credentials. Clears them so the user reconnects cleanly.
+ */
+function resetTableauState(session: Session): void {
+  session.tableauAuth = undefined;
+  session.flow = {};
+}
+
 export const VaultService = {
   isRegistered(username: string): boolean {
     return hasUser(username);
@@ -84,31 +128,8 @@ export const VaultService = {
         hint: 'Register first, or check the username.',
       });
     }
-    const cfg = getConfig().vault;
-    if (record.lockedUntil && record.lockedUntil > Date.now()) {
-      const seconds = Math.ceil((record.lockedUntil - Date.now()) / 1000);
-      throw new AppError('PIN_LOCKED', `Too many attempts. Try again in ${seconds}s.`);
-    }
-    if (!isValidPin(pin)) throw new AppError('VALIDATION', 'PIN must be exactly 6 digits.');
 
-    const key = deriveKey(pin, record.saltHex);
-    if (!checkVerifier(key, record.verifier)) {
-      record.failedAttempts += 1;
-      if (record.failedAttempts >= cfg.maxAttempts) {
-        record.lockedUntil = Date.now() + cfg.lockoutSeconds * 1000;
-        record.failedAttempts = 0;
-        putRecord(record);
-        log.warn('Vault locked after failed attempts', { username: uname });
-        throw new AppError('PIN_LOCKED', `Too many attempts. Locked for ${cfg.lockoutSeconds}s.`);
-      }
-      putRecord(record);
-      const remaining = cfg.maxAttempts - record.failedAttempts;
-      throw new AppError('AUTH_FAILED', `Incorrect PIN. ${remaining} attempt(s) remaining.`);
-    }
-
-    // Success — reset counters.
-    record.failedAttempts = 0;
-    record.lockedUntil = null;
+    const key = verifyPinOrThrow(record, pin);
     record.updatedAt = nowIso();
     putRecord(record);
 
@@ -144,6 +165,38 @@ export const VaultService = {
       hasConnectedApp: Boolean(creds.connectedApp),
     });
     return summarizeCredentials(creds);
+  },
+
+  /**
+   * Modify saved credentials AFTER re-confirming the user's PIN. Even within an
+   * unlocked session, changing stored secrets requires the PIN again (per product
+   * requirement). Succeeds only for the correct PIN, subject to lockout.
+   */
+  updateCredentials(session: Session, pin: string, creds: TableauCredentials): CredentialSummary {
+    const record = getRecord(session.username);
+    if (!record) throw new AppError('AUTH_REQUIRED', 'Session user no longer exists.');
+
+    const key = verifyPinOrThrow(record, pin);
+    validateCredentials(creds);
+
+    record.creds = encrypt(key, JSON.stringify(creds));
+    record.updatedAt = nowIso();
+    putRecord(record);
+
+    session.vaultKey = key;
+    session.credentials = creds;
+    resetTableauState(session);
+
+    log.info('Updated Tableau credentials in vault', {
+      username: session.username,
+      hasConnectedApp: Boolean(creds.connectedApp),
+    });
+    return summarizeCredentials(creds);
+  },
+
+  /** Non-secret summary of the session's saved credentials (for prefilling edits). */
+  getCredentialSummary(session: Session): CredentialSummary | null {
+    return session.credentials ? summarizeCredentials(session.credentials) : null;
   },
 
   /** Read decrypted credentials from the live session (never from disk on demand). */

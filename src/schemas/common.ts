@@ -7,7 +7,11 @@ import { z } from 'zod';
 /** Supported Tableau visualization types the planner may choose from. */
 export const ChartTypeSchema = z.enum([
   'bar',
+  'horizontal_bar',
+  'stacked_bar',
+  'side_by_side_bar',
   'line',
+  'dual_line',
   'area',
   'scatter',
   'pie',
@@ -26,8 +30,33 @@ export const ChartTypeSchema = z.enum([
   'funnel',
   'kpi',
   'dual_axis',
+  'bubble',
+  'bar_line_combo',
+  'detail',
 ]);
 export type ChartType = z.infer<typeof ChartTypeSchema>;
+
+/** Date part / truncation for date dimensions on an axis. */
+export const DateDerivationSchema = z.enum([
+  'none',
+  'year',
+  'quarter',
+  'month',
+  'week',
+  'day',
+  'weekday',
+  'hour',
+  'minute',
+]);
+export type DateDerivation = z.infer<typeof DateDerivationSchema>;
+
+/** High-level number format kind for a measure. */
+export const NumberFormatKindSchema = z.enum(['currency', 'percentage', 'number', 'scientific']);
+export type NumberFormatKind = z.infer<typeof NumberFormatKindSchema>;
+
+/** Display scaling for a measure (divide by 1e3 / 1e6). */
+export const NumberScaleSchema = z.enum(['none', 'thousands', 'millions']);
+export type NumberScale = z.infer<typeof NumberScaleSchema>;
 
 /** Filter operators supported by Tableau authoring where reliably achievable. */
 export const FilterOperatorSchema = z.enum([
@@ -102,10 +131,31 @@ export const SortingSpecSchema = z.object({
 });
 export type SortingSpec = z.infer<typeof SortingSpecSchema>;
 
+/** A 6-digit hex color like `#4e79a7`. */
+export const HexColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/, 'Expected a #rrggbb hex color');
+export type HexColor = z.infer<typeof HexColorSchema>;
+
+/** Optional text formatting for a title/heading (font family, size, color, weight). */
+export const TextFormatSchema = z.object({
+  fontName: z.string().optional(),
+  fontSize: z.number().int().min(6).max(72).optional(),
+  fontColor: HexColorSchema.optional(),
+  bold: z.boolean().optional(),
+});
+export type TextFormat = z.infer<typeof TextFormatSchema>;
+
 export const FormattingSpecSchema = z.object({
   numberFormat: z.string().optional(),
   showLabels: z.boolean().optional(),
   colorPalette: z.string().optional(),
   title: z.string().optional(),
+  /** Font/size/color for the worksheet title (defaults to bold Tableau Bold 12). */
+  titleFormat: TextFormatSchema.optional(),
+  /**
+   * Field placed on the COLOR mark (user-selectable before approval). A dimension colors
+   * by category (discrete); a measure colors by value (continuous). When omitted, the
+   * chart's default color encoding applies.
+   */
+  colorField: z.string().optional(),
 });
 export type FormattingSpec = z.infer<typeof FormattingSpecSchema>;

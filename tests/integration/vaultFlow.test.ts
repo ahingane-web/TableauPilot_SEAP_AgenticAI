@@ -68,3 +68,65 @@ describe('vault register -> save -> unlock flow', () => {
     expect(() => VaultService.register(uniqueUser(), '12ab56')).toThrow(/6 digits/i);
   });
 });
+
+describe('editing credentials requires the PIN', () => {
+  it('updates credentials with the correct PIN and resets the live connection', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '246810');
+    const session = getSession(reg.sessionId)!;
+    VaultService.saveCredentials(session, creds);
+
+    // Simulate an active Tableau connection + flow state.
+    session.tableauAuth = {
+      token: 'live-token',
+      siteId: 'site',
+      siteContentUrl: 'mysite',
+      userId: 'u',
+      serverUrl: 'https://x',
+      signedInAt: Date.now(),
+    };
+    session.flow.datasourceLock = {
+      datasourceId: 'd',
+      datasourceName: 'DS',
+      siteId: 'site',
+      lockedAt: new Date().toISOString(),
+    };
+
+    const updated: typeof creds = { ...creds, patName: 'rotated', patSecret: 'new-secret', connectedApp: undefined };
+    const summary = VaultService.updateCredentials(session, '246810', updated);
+
+    expect(summary.patName).toBe('rotated');
+    expect(summary.hasConnectedApp).toBe(false);
+    expect(VaultService.getCredentials(session).patSecret).toBe('new-secret');
+    // Changing credentials must invalidate the live connection + flow.
+    expect(session.tableauAuth).toBeUndefined();
+    expect(session.flow.datasourceLock).toBeUndefined();
+
+    // Persisted: a fresh unlock returns the rotated credentials.
+    VaultService.logout(reg.sessionId);
+    const re = VaultService.unlock(username, '246810');
+    expect(getSession(re.sessionId)!.credentials?.patName).toBe('rotated');
+  });
+
+  it('rejects a credential edit with the wrong PIN and leaves creds unchanged', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '135790');
+    const session = getSession(reg.sessionId)!;
+    VaultService.saveCredentials(session, creds);
+
+    expect(() => VaultService.updateCredentials(session, '000000', { ...creds, patName: 'hacker' })).toThrow(/incorrect pin/i);
+    // Original credentials remain intact.
+    expect(VaultService.getCredentials(session).patName).toBe('pilot');
+  });
+
+  it('exposes only a non-secret summary via getCredentialSummary', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '112233');
+    const session = getSession(reg.sessionId)!;
+    expect(VaultService.getCredentialSummary(session)).toBeNull();
+    VaultService.saveCredentials(session, creds);
+    const summary = VaultService.getCredentialSummary(session)!;
+    expect(summary.hasPatSecret).toBe(true);
+    expect(summary).not.toHaveProperty('patSecret');
+  });
+});

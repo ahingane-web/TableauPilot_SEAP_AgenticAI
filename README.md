@@ -11,7 +11,12 @@ vault** and never reach the browser or the LLM.
 > **Hybrid authoring:** AI plan → server-side `.twb` generation → REST publish → embedded
 > **real** Web Authoring → REST verification. No fake editor, no fabricated success.
 
+- **Product requirements:** [docs/prd.md](./docs/prd.md)
 - **Architecture:** [docs/architecture.md](./docs/architecture.md)
+- **Detailed design:** [docs/design.md](./docs/design.md)
+- **Engineering & AI rules:** [docs/rules.md](./docs/rules.md)
+- **Build plan (phases):** [docs/phases.md](./docs/phases.md)
+- **Progress log:** [docs/memory.md](./docs/memory.md)
 - **What's automatable (and what isn't):** [docs/tableau-api-capabilities.md](./docs/tableau-api-capabilities.md)
 - **Authoring limits (Category C):** [docs/authoring-limitations.md](./docs/authoring-limitations.md)
 - **Authentication:** [docs/authentication.md](./docs/authentication.md)

@@ -44,4 +44,44 @@ describe('validatePlanFields', () => {
     expect(res.valid).toBe(false);
     expect(res.errors.some((e) => e.field === 'Ghost' && e.location.startsWith('filters'))).toBe(true);
   });
+
+  it('matches field names case-insensitively (Tableau treats names case-insensitively)', () => {
+    const plan = makePlan();
+    plan.worksheets[0]!.dimensions = ['category']; // lower-case vs metadata "Category"
+    plan.worksheets[0]!.measures = [{ field: 'SALES', aggregation: 'sum' }];
+    const res = validatePlanFields(plan, metadata);
+    expect(res.valid).toBe(true);
+  });
+
+  it("flags a Top-N ranking measure (topN.byMeasure) that doesn't exist", () => {
+    const plan = makePlan();
+    plan.worksheets[0]!.filters = [
+      { field: 'Category', operator: 'top_n', values: [], scope: 'all_worksheets', showAsControl: false, topN: { n: 5, byMeasure: 'Revenue', measureAggregation: 'sum', direction: 'top' } },
+    ];
+    const res = validatePlanFields(plan, metadata);
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e) => e.field === 'Revenue' && e.location.includes('topN.byMeasure'))).toBe(true);
+  });
+
+  it('flags an unknown reference-line field, colorMap field, and colorField', () => {
+    const plan = makePlan();
+    plan.worksheets[0]!.referenceLines = [{ field: 'Ghost1', aggregation: 'avg', formula: 'average', scope: 'per-pane', labelType: 'automatic' }];
+    plan.worksheets[0]!.colorMap = { field: 'Ghost2', colors: [{ value: 'x', color: '#000000' }] };
+    plan.worksheets[0]!.formatting = { colorField: 'Ghost3' };
+    const res = validatePlanFields(plan, metadata);
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e) => e.field === 'Ghost1' && e.location.includes('referenceLines'))).toBe(true);
+    expect(res.errors.some((e) => e.field === 'Ghost2' && e.location.includes('colorMap'))).toBe(true);
+    expect(res.errors.some((e) => e.field === 'Ghost3' && e.location.includes('colorField'))).toBe(true);
+  });
+
+  it('flags a dashboard item referencing a worksheet the plan does not define', () => {
+    const plan = makePlan();
+    plan.dashboards = [
+      { ...plan.layout, name: 'Board A', items: [{ worksheet: 'Ghost Sheet', row: 0, col: 0, rowSpan: 1, colSpan: 1, kind: 'chart' }] },
+    ];
+    const res = validatePlanFields(plan, metadata);
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e) => e.field === 'Ghost Sheet' && e.location.includes('dashboards'))).toBe(true);
+  });
 });

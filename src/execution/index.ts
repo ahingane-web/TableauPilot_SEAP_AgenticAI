@@ -10,6 +10,7 @@ import { TableauService } from '../tableau/index.js';
 import type { WorkbookVerification } from '../tableau/types.js';
 import { AppError } from '../utils/errors.js';
 import { recordEvent, withSpan } from '../observability/index.js';
+import { validatePlanFields } from '../validation/fieldValidation.js';
 import type { Session } from '../vault/session.js';
 
 export interface CreationResult {
@@ -34,6 +35,26 @@ export async function runPublishAndVerify(session: Session): Promise<CreationRes
 
   return withSpan('execution.publish_and_verify', { dashboard: plan.dashboardName }, async () => {
     const metadata = await TableauService.getMetadata(session, lock.datasourceId, lock.datasourceName);
+
+    // HARD GATE: every field the plan uses (worksheets, filters, calc formulas) must exist
+    // in the live datasource. This stops charts/KPIs that reference a hallucinated field
+    // (which would publish but render BLANK). Only enforced when metadata is actually
+    // available (otherwise we cannot know the field set).
+    if (metadata.fields.length > 0) {
+      const validation = validatePlanFields(plan, metadata);
+      if (!validation.valid) {
+        const bad = validation.errors
+          .slice(0, 10)
+          .map((e) => `"${e.field}" (${e.location})`)
+          .join(', ');
+        throw new AppError(
+          'VALIDATION',
+          `The plan references fields that do not exist in the datasource: ${bad}. ` +
+            `Regenerate the plan so it only uses available fields.`,
+          { details: { errors: validation.errors, availableDimensions: validation.availableDimensions, availableMeasures: validation.availableMeasures } },
+        );
+      }
+    }
 
     // Publish (guards enforced inside).
     const publish = await TableauService.publishPlan(session, plan, metadata);

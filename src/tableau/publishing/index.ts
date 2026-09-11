@@ -6,6 +6,7 @@
  * this module simply performs the upload and returns what Tableau actually created.
  */
 import { escapeXml } from '../authoring/twbGenerator.js';
+import { packageTwbx } from '../authoring/twbxPackager.js';
 import { AppError } from '../../utils/errors.js';
 import { logger } from '../../utils/logger.js';
 import type { TableauClient } from '../tableauClient.js';
@@ -30,15 +31,29 @@ export async function publishWorkbook(client: TableauClient, input: PublishWorkb
     `</workbook>` +
     `</tsRequest>`;
 
+  // Package the .twb into a .twbx (ZIP). This is the standard publish format and
+  // avoids ambiguity in how Tableau's loader resolves the workbook file.
+  const twbx = packageTwbx(input.twbXml, input.workbookName);
+  log.info('Packaged workbook as .twbx', {
+    workbookName: input.workbookName,
+    twbxBytes: twbx.byteLength,
+  });
+
+  // skipConnectionCheck=true: do NOT run the server-side "publish check" that tries
+  // to load/validate the workbook's connection to the published datasource at publish
+  // time. That check is what was failing (400 "<publish check>" / 403 500000 internal
+  // error). With it skipped, Tableau stores the workbook and validates the connection
+  // when the workbook is actually opened. (workbookType is not a real Publish Workbook
+  // parameter — the file type is inferred from the .twbx filename.)
   const body = await client.postMultipart<any>(
-    `/sites/${input.siteId}/workbooks?overwrite=${input.overwrite ? 'true' : 'false'}&workbookType=twb`,
+    `/sites/${input.siteId}/workbooks?overwrite=${input.overwrite ? 'true' : 'false'}&skipConnectionCheck=true`,
     [
       { name: 'request_payload', contentType: 'text/xml', body: requestPayload },
       {
         name: 'tableau_workbook',
-        filename: `${sanitizeFilename(input.workbookName)}.twb`,
+        filename: `${sanitizeFilename(input.workbookName)}.twbx`,
         contentType: 'application/octet-stream',
-        body: Buffer.from(input.twbXml, 'utf8'),
+        body: twbx,
       },
     ],
   );

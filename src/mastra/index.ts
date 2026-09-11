@@ -9,12 +9,14 @@
 import { Mastra } from '@mastra/core/mastra';
 import { PinoLogger } from '@mastra/loggers';
 import { tableauPilotAgent } from '../agents/tableauPilotAgent.js';
+import { dashboardPlannerAgent } from '../agents/dashboardPlannerAgent.js';
+import { calculationEngineerAgent } from '../agents/calculationEngineerAgent.js';
 import { workflows } from '../workflows/index.js';
 import { getConfig } from '../config/env.js';
 import { getStorage } from './storage.js';
 
 export const mastra = new Mastra({
-  agents: { tableauPilotAgent },
+  agents: { tableauPilotAgent, dashboardPlannerAgent, calculationEngineerAgent },
   workflows,
   storage: getStorage(),
   logger: new PinoLogger({

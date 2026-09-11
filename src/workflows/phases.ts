@@ -187,7 +187,6 @@ export const dashboardAuthoringWorkflow = createWorkflow({
         const session = VaultService.requireSession(inputData.sessionId);
         const wb = session.flow.workbook;
         const info = TableauService.getEmbedInfo(session, {
-          mode: 'existing_workbook',
           workbook: wb ? { id: wb.workbookId, name: wb.name, webpageUrl: wb.webpageUrl, contentUrl: wb.contentUrl } : undefined,
         });
         return {

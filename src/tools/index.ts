@@ -14,6 +14,7 @@ import { checkPermissionsTool } from './permissionTool.js';
 import { validateDashboardPlanTool } from './authoringTool.js';
 import { publishDashboardTool } from './publishingTool.js';
 import { verifyWorkbookTool } from './verificationTool.js';
+import { designCalculatedFieldsTool } from './calculationTool.js';
 
 export {
   authenticateTableauTool,
@@ -25,6 +26,7 @@ export {
   validateDashboardPlanTool,
   publishDashboardTool,
   verifyWorkbookTool,
+  designCalculatedFieldsTool,
 };
 
 /** Tools the agent may call (read-only + context + validation). */
@@ -37,6 +39,7 @@ export const agentTools = {
   check_tableau_permissions: checkPermissionsTool,
   validate_dashboard_plan: validateDashboardPlanTool,
   verify_workbook: verifyWorkbookTool,
+  design_calculated_fields: designCalculatedFieldsTool,
 };
 
 /** Execution-layer tools (used by workflows/server after approval). */

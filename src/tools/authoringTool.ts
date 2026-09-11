@@ -32,9 +32,16 @@ export const validateDashboardPlanTool = createTool({
       if (!lock) throw new AppError('DATASOURCE_LOCKED', 'Lock a datasource before validating a plan.');
       const metadata = await TableauService.getMetadata(session, lock.datasourceId, lock.datasourceName);
       // Compose a full plan using the approved project as the (guarded) publishing target.
+      // The datasource identity is server-owned (from the lock), not part of the draft.
       const project = session.flow.projectContext;
       const fullPlan = {
         ...input.plan,
+        datasource: {
+          datasourceId: lock.datasourceId,
+          datasourceName: lock.datasourceName,
+          siteId: lock.siteId,
+          contentUrl: lock.contentUrl,
+        },
         publishing: {
           siteId: project?.siteId ?? lock.siteId,
           projectId: project?.projectId ?? '',

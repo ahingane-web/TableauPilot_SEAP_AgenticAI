@@ -2,14 +2,15 @@ import React, { useEffect, useState } from 'react';
 import { api, getSessionId } from './api';
 import type { CreationResult, SessionContext } from './types';
 import { ConnectionPanel } from './components/ConnectionPanel';
+import { CredentialsPanel } from './components/CredentialsPanel';
 import { SetupPanel } from './components/SetupPanel';
 import { PlanPanel } from './components/PlanPanel';
-import { AuthoringPanel } from './components/AuthoringPanel';
+import { PublishedViewPanel } from './components/PublishedViewPanel';
 
 /**
  * TableauPilot AI — two-pane copilot.
  * Left: AI planning workflow (identity/PIN -> connect -> lock -> plan -> approve -> create -> verify).
- * Right: the REAL Tableau Cloud Web Authoring embed for human refinement.
+ * Right: the READ-ONLY published dashboard viewer (preview thumbnail + live embed).
  */
 export function App(): React.ReactElement {
   const [ctx, setCtx] = useState<SessionContext | null>(null);
@@ -51,7 +52,7 @@ export function App(): React.ReactElement {
           <span className={`step ${step === 0 ? 'active' : step > 0 ? 'done' : ''}`}>Vault</span>
           <span className={`step ${step === 1 ? 'active' : step > 1 ? 'done' : ''}`}>Connect & lock</span>
           <span className={`step ${step === 2 ? 'active' : step > 2 ? 'done' : ''}`}>Plan & create</span>
-          <span className={`step ${step === 3 ? 'active' : ''}`}>Refine</span>
+          <span className={`step ${step === 3 ? 'active' : ''}`}>View</span>
         </div>
         <div className="spacer" />
         {ctx ? (
@@ -75,6 +76,7 @@ export function App(): React.ReactElement {
             <ConnectionPanel onReady={setCtx} />
           ) : (
             <>
+              <CredentialsPanel ctx={ctx} onChange={setCtx} />
               <SetupPanel ctx={ctx} onChange={setCtx} />
               <PlanPanel ctx={ctx} onChange={setCtx} onCreated={setLastResult} />
             </>
@@ -82,7 +84,7 @@ export function App(): React.ReactElement {
         </div>
         <div className="right">
           {ctx ? (
-            <AuthoringPanel ctx={ctx} key={lastResult?.workbookId ?? ctx.workbook?.workbookId ?? 'none'} />
+            <PublishedViewPanel ctx={ctx} key={lastResult?.workbookId ?? ctx.workbook?.workbookId ?? 'none'} />
           ) : (
             <div className="embed-empty">Unlock your vault to begin.</div>
           )}

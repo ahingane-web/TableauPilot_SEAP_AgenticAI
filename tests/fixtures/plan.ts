@@ -76,8 +76,10 @@ export function makePlan(): DashboardPlan {
     filters: [{ field: 'Region', operator: 'in', values: ['East', 'West'], scope: 'all_worksheets', showAsControl: true }],
     calculatedFields: [],
     parameters: [],
+    actions: [],
+    dashboards: [],
     layout: {
-      size: 'desktop',
+      size: 'fixed',
       width: 1200,
       height: 800,
       columns: 4,

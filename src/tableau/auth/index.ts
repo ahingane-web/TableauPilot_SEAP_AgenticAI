@@ -19,16 +19,38 @@ export interface TableauSession {
   serverUrl: string;
 }
 
+/**
+ * Reduce a user-entered Tableau Cloud URL to just its origin (protocol + host).
+ * Users often paste a full dashboard URL such as
+ * `https://10ax.online.tableau.com/#/site/mysite/views/...`; the REST API lives at
+ * the pod origin only, so anything after the host would produce an HTML response.
+ */
+export function normalizeCloudUrl(input: string): string {
+  const raw = (input ?? '').trim();
+  if (!raw) {
+    throw new AppError('VALIDATION', 'Tableau Cloud URL is required.');
+  }
+  const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    return new URL(withProto).origin;
+  } catch {
+    throw new AppError('VALIDATION', 'Tableau Cloud URL is not a valid URL.', {
+      hint: 'Use the base pod URL only, e.g. https://10ax.online.tableau.com',
+    });
+  }
+}
+
 /** Sign in to Tableau Cloud REST API using PAT credentials from the vault. */
 export async function signIn(creds: TableauCredentials): Promise<TableauSession> {
-  const client = new TableauClient(creds.cloudUrl);
+  const serverUrl = normalizeCloudUrl(creds.cloudUrl);
+  const client = new TableauClient(serverUrl);
   const auth = await client.signIn({
-    serverUrl: creds.cloudUrl,
+    serverUrl,
     siteContentUrl: creds.siteContentUrl,
     patName: creds.patName,
     patSecret: creds.patSecret,
   });
-  return { client, auth, serverUrl: creds.cloudUrl };
+  return { client, auth, serverUrl };
 }
 
 function base64url(input: Buffer | string): string {

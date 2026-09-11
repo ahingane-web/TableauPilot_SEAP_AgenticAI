@@ -119,7 +119,7 @@ const approvalStep = createStep({
     }
     const session = VaultService.requireSession(inputData.sessionId);
     if (!inputData.planHash) throw new AppError('APPROVAL_REQUIRED', 'Missing plan hash for approval.');
-    approvePlan(session, inputData.planHash);
+    await approvePlan(session, inputData.planHash);
     return io({ ...inputData, status: 'approved' });
   },
 });

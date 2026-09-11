@@ -158,6 +158,11 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                   ? `${metadata.fieldCount} fields discovered via the Metadata API`
                   : 'Metadata API unavailable — fields could not be listed'}
               </div>
+              {!metadata.metadataApiAvailable && metadata.unavailableReason ? (
+                <div className="warnbox small" style={{ marginTop: 6 }}>
+                  {metadata.unavailableReason}
+                </div>
+              ) : null}
               <FieldPills title="Dimensions" cls="dim" fields={metadata.dimensions.map((f) => f.name)} />
               <FieldPills title="Measures" cls="mea" fields={metadata.measures.map((f) => f.name)} />
               <FieldPills title="Dates" cls="date" fields={metadata.dates.map((f) => f.name)} />
