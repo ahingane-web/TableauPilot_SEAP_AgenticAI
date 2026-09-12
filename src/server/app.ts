@@ -24,7 +24,7 @@ import {
   updateWorksheetFormatting,
 } from '../planning/index.js';
 import { hashPlan } from '../validation/guards.js';
-import { HexColorSchema, TextFormatSchema } from '../schemas/common.js';
+import { HexColorSchema, TextFormatSchema, SalesforceCredentialsSchema, FitModeSchema } from '../schemas/common.js';
 import { ReferenceLineSpecSchema, ColorMapSpecSchema, GrandTotalsSchema } from '../schemas/worksheetSpec.js';
 import { runPublishAndVerify } from '../execution/index.js';
 import { TableauService } from '../tableau/index.js';
@@ -58,11 +58,43 @@ const WorksheetFormatReqSchema = z.object({
   titleFormat: TextFormatSchema.nullable().optional(),
   /** Field to place on the color mark (empty string clears it). */
   colorField: z.union([z.string(), z.literal('')]).nullable().optional(),
+  /** Per-sheet fit inside its dashboard zone (null clears back to the chart-type default). */
+  fit: FitModeSchema.nullable().optional(),
 });
 
 /** First few zod issues as readable strings for a VALIDATION error's details. */
 function zodIssues(err: z.ZodError): string[] {
   return err.issues.map((i) => `${i.path.join('.') || 'root'}: ${i.message}`).slice(0, 8);
+}
+
+/**
+ * Minimal HTML returned to the OAuth popup: it notifies the opener window (so the
+ * app can proceed to table selection) and closes itself. No secrets are included.
+ */
+function oauthResultHtml(result: { ok: boolean; message?: string }): string {
+  const payload = JSON.stringify({ type: 'sf-oauth', ok: result.ok, message: result.message ?? '' });
+  const heading = result.ok ? 'Salesforce connected' : 'Salesforce sign-in failed';
+  const detail = result.ok
+    ? 'You can close this window and return to TableauPilot.'
+    : escapeHtml(result.message ?? 'Please try again.');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title></head>
+<body style="font-family:system-ui,sans-serif;padding:24px;color:#1a1a1a">
+<h3>${heading}</h3><p>${detail}</p>
+<script>
+  try { if (window.opener) window.opener.postMessage(${payload}, '*'); } catch (e) {}
+  setTimeout(function(){ window.close(); }, 800);
+</script>
+</body></html>`;
+}
+
+/** Escape text for safe inclusion in the OAuth result HTML body. */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function requireSession(c: { req: { header: (k: string) => string | undefined } }): Session {
@@ -223,6 +255,123 @@ export function createApp(): Hono {
   });
 
   app.get('/api/tableau/context', (c) => c.json(contextSnapshot(requireSession(c))));
+
+  // ------------------------------------------------------------- Connectors (Build datasource)
+  // Alternative to locking an existing published datasource: connect to a source
+  // (Salesforce), build a datasource, and publish it. On success the flow converges
+  // on the same datasource lock + project context the published path produces, so the
+  // downstream dashboard-building flow is unchanged.
+  app.get('/api/connectors', (c) => {
+    requireSession(c);
+    const sf = getConfig().salesforce;
+    // `oauthConfigured` tells the UI whether the server holds a Connected App, so it
+    // can render a single "Sign in with Salesforce" button (like Tableau's connector)
+    // instead of asking the user for a Consumer Key/Secret.
+    const oauthConfigured = Boolean(sf.oauthClientId);
+    const items = TableauService.listConnectors().map((it) =>
+      it.id === 'salesforce'
+        ? { ...it, oauthRedirectUri: sf.oauthRedirectUri, oauthConfigured }
+        : it,
+    );
+    return c.json({ items });
+  });
+
+  app.post('/api/connectors/salesforce/connect', async (c) => {
+    const session = requireSession(c);
+    const parsed = SalesforceCredentialsSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new AppError('VALIDATION', 'Salesforce url, username, and password are required.', {
+        details: { issues: zodIssues(parsed.error) },
+      });
+    }
+    const tables = await TableauService.salesforceListTables(session, parsed.data);
+    // Return only non-secret table identity to the client.
+    return c.json({ tables: tables.map((t) => ({ name: t.name, label: t.label })) });
+  });
+
+  // Interactive OAuth (browser sign-in). The agent opens `authUrl` in a popup; the
+  // user authenticates with Salesforce; Salesforce redirects to the callback below.
+  app.post('/api/connectors/salesforce/oauth/start', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ url?: string; clientId?: string; clientSecret?: string }>();
+    const url = String(body.url ?? '').trim();
+    const clientId = String(body.clientId ?? '').trim();
+    if (!url) throw new AppError('VALIDATION', 'A Salesforce login URL is required.');
+    // clientId is optional here: the server may provide a pre-registered Connected
+    // App (SALESFORCE_OAUTH_CLIENT_ID). salesforceOauthStart enforces that at least
+    // one source of a client id exists and throws a clear error otherwise.
+    const { authUrl, redirectUri } = TableauService.salesforceOauthStart(session, {
+      url,
+      clientId: clientId || undefined,
+      clientSecret: body.clientSecret?.trim() || undefined,
+    });
+    return c.json({ authUrl, redirectUri });
+  });
+
+  // OAuth redirect target (no session header — routed back via `state`). Renders a
+  // tiny page that notifies the opener window and closes the popup.
+  app.get('/api/connectors/salesforce/oauth/callback', async (c) => {
+    const code = c.req.query('code');
+    const state = c.req.query('state');
+    const oauthError = c.req.query('error_description') ?? c.req.query('error');
+    try {
+      if (oauthError) throw new AppError('AUTH_FAILED', `Salesforce sign-in was cancelled or failed: ${oauthError}`);
+      if (!code || !state) throw new AppError('VALIDATION', 'Missing OAuth code/state from Salesforce.');
+      await TableauService.completeSalesforceOauth({ code, state });
+      return c.html(oauthResultHtml({ ok: true }));
+    } catch (err) {
+      const safe = sanitizeError(err);
+      return c.html(oauthResultHtml({ ok: false, message: safe.message }), safe.status as 400);
+    }
+  });
+
+  // The tables listed for the current Salesforce connector session (used by the UI
+  // after the OAuth popup completes).
+  app.get('/api/connectors/salesforce/tables', (c) => {
+    const session = requireSession(c);
+    const tables = TableauService.salesforceListedTables(session).map((t) => ({ name: t.name, label: t.label }));
+    return c.json({ tables });
+  });
+
+  app.post('/api/connectors/salesforce/publish', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{
+      credentials?: unknown;
+      object?: string;
+      projectId?: string;
+      datasourceName?: string;
+      overwrite?: boolean;
+      serverOauthCustom?: boolean;
+    }>();
+    // Salesforce credentials are used ONLY to read the object schema (describe); they are
+    // never embedded in the published datasource (publishing uses the saved credential).
+    const creds = SalesforceCredentialsSchema.safeParse(body.credentials);
+    if (!creds.success) {
+      throw new AppError('VALIDATION', 'Salesforce url, username, and password are required to read the object schema.', {
+        details: { issues: zodIssues(creds.error) },
+      });
+    }
+    const object = String(body.object ?? '').trim();
+    const projectId = String(body.projectId ?? '').trim();
+    const datasourceName = String(body.datasourceName ?? '').trim();
+    if (!object) throw new AppError('VALIDATION', 'Provide a Salesforce object/table (e.g. Account).');
+    if (!projectId) throw new AppError('VALIDATION', 'Select a Tableau project/folder to publish into.');
+    if (!datasourceName) throw new AppError('VALIDATION', 'Provide a name for the new datasource.');
+    const result = await TableauService.buildAndPublishSalesforceDatasource(session, {
+      credentials: creds.data,
+      object,
+      projectId,
+      datasourceName,
+      overwrite: Boolean(body.overwrite),
+      // Default true (matches the reference); allow the client to opt into built-in OAuth.
+      serverOauthCustom: body.serverOauthCustom !== false,
+    });
+    return c.json({
+      datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },
+      extract: { state: result.extract.state, message: result.extract.message },
+      ...contextSnapshot(session),
+    });
+  });
 
   // ------------------------------------------------------------- Dashboard
   app.post('/api/dashboard/plan', async (c) => {

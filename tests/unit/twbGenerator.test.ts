@@ -45,6 +45,119 @@ describe('generateTwb', () => {
     expect(xml).toContain('<parent-name>[sqlproxy]</parent-name>');
   });
 
+  it('uses Standard fit (no entire-view zoom) for a detail sheet, but Entire View for charts', () => {
+    // Baseline: the default plan's bar chart keeps Entire View.
+    expect(xml).toContain("<zoom type='entire-view' />");
+
+    const plan = makePlan();
+    plan.dashboardName = 'Contacts';
+    plan.worksheets = [
+      {
+        name: 'Contact Details',
+        chartType: 'detail',
+        dimensions: ['Category'],
+        measures: [{ field: 'Sales', aggregation: 'sum' }],
+        filters: [],
+        calculations: [],
+      },
+    ] as unknown as typeof plan.worksheets;
+    plan.filters = [];
+    plan.layout = {
+      ...plan.layout,
+      items: [{ worksheet: 'Contact Details', row: 0, col: 0, rowSpan: 1, colSpan: 1, kind: 'chart' }],
+    };
+    const out = generateTwb(plan, metadata, { serverHost: 'prod-in-a.online.tableau.com' });
+    // The detail sheet's viewpoint omits the entire-view zoom → Standard (scrollable) fit.
+    const vpStart = out.indexOf("<viewpoint name='Contact Details'>");
+    expect(vpStart).toBeGreaterThan(-1);
+    const viewpoint = out.slice(vpStart, out.indexOf('</viewpoint>', vpStart));
+    expect(viewpoint).not.toContain("<zoom type='entire-view' />");
+  });
+
+  it('honors an explicit per-sheet Fit override (formatting.fit) over the chart-type default', () => {
+    const plan = makePlan();
+    plan.dashboardName = 'Fit Board';
+    plan.worksheets = [
+      {
+        name: 'Sales Bar',
+        chartType: 'bar',
+        dimensions: ['Category'],
+        measures: [{ field: 'Sales', aggregation: 'sum' }],
+        filters: [],
+        calculations: [],
+        // A bar chart defaults to Entire View, but the user pinned it to Fit Width.
+        formatting: { fit: 'fit_width' },
+      },
+    ] as unknown as typeof plan.worksheets;
+    plan.filters = [];
+    plan.layout = {
+      ...plan.layout,
+      items: [{ worksheet: 'Sales Bar', row: 0, col: 0, rowSpan: 1, colSpan: 1, kind: 'chart' }],
+    };
+    const out = generateTwb(plan, metadata, { serverHost: 'prod-in-a.online.tableau.com' });
+    const vpStart = out.indexOf("<viewpoint name='Sales Bar'>");
+    const viewpoint = out.slice(vpStart, out.indexOf('</viewpoint>', vpStart));
+    expect(viewpoint).toContain("<zoom type='fit-width' />");
+    expect(viewpoint).not.toContain("entire-view");
+  });
+
+  it('normalizes a boolean dimension filter member to the canonical unquoted true/false', () => {
+    const plan = makePlan();
+    plan.worksheets = [
+      {
+        name: 'Important Contacts',
+        chartType: 'bar',
+        dimensions: ['Category'],
+        measures: [{ field: 'Sales', aggregation: 'sum' }],
+        // Plan supplies a non-canonical boolean value ("Yes"); Tableau only parses true/false.
+        filters: [{ field: 'Important', operator: 'in', values: ['Yes'], scope: 'selected_worksheets', worksheets: ['Important Contacts'], showAsControl: false }],
+        calculations: [],
+      },
+    ] as unknown as typeof plan.worksheets;
+    plan.filters = [];
+    const meta = {
+      ...metadata,
+      fields: [
+        ...metadata.fields,
+        { name: 'Important', role: 'dimension', dataType: 'BOOLEAN', isDate: false, fieldType: 'ColumnField' },
+      ],
+    } as typeof metadata;
+    const out = generateTwb(plan, meta, { serverHost: 'prod-in-a.online.tableau.com' });
+    // The boolean member is the unquoted literal `true`, never the raw plan value.
+    expect(out).toContain("function='member' level='[none:Important:nk]' member='true'");
+    expect(out).not.toContain("member='Yes'");
+    expect(out).not.toContain("member='&quot;Yes&quot;'");
+  });
+
+  it('coerces a boolean field used as a measure to a real column (Tableau rejects boolean measures)', () => {
+    const plan = makePlan();
+    plan.worksheets = [
+      {
+        name: 'Priority Count',
+        chartType: 'bar',
+        dimensions: ['Category'],
+        measures: [{ field: 'IsPriorityRecord', aggregation: 'sum' }],
+        filters: [],
+        calculations: [],
+      },
+    ] as unknown as typeof plan.worksheets;
+    const meta = {
+      ...metadata,
+      fields: [
+        ...metadata.fields,
+        { name: 'IsPriorityRecord', role: 'measure', dataType: 'BOOLEAN', isDate: false, fieldType: 'ColumnField' },
+      ],
+    } as typeof metadata;
+    const out = generateTwb(plan, meta, { serverHost: 'prod-in-a.online.tableau.com' });
+    // The datasource column is declared real+measure, never boolean+measure.
+    expect(out).toContain(
+      "<column caption='IsPriorityRecord' datatype='real' name='[IsPriorityRecord]' role='measure' type='quantitative' />",
+    );
+    expect(out).not.toContain("datatype='boolean' name='[IsPriorityRecord]' role='measure'");
+    // The metadata-record local-type is coerced too (real -> remote-type 5).
+    expect(out).toMatch(/<remote-name>IsPriorityRecord<\/remote-name>\s*<remote-type>5<\/remote-type>/);
+  });
+
   it('renders every worksheet from the plan', () => {
     expect(xml).toContain("<worksheet name='Sales by Category'>");
     expect(xml).toContain("<worksheet name='Profit Ratio'>");

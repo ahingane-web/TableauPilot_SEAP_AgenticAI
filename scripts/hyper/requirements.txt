@@ -1,0 +1,4 @@
+# Tableau Hyper API — used ONLY to materialize a local .hyper extract for a
+# Salesforce datasource (see scripts/hyper/build_tdsx.py). Installed into a local
+# virtualenv via `npm run setup:hyper`; never bundled with the Node runtime.
+tableauhyperapi>=0.0.14000

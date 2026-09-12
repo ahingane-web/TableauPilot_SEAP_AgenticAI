@@ -113,6 +113,18 @@ export const TableauProjectContextSchema = z.object({
 });
 export type TableauProjectContext = z.infer<typeof TableauProjectContextSchema>;
 
+/**
+ * Credentials for the Salesforce connector (Build-datasource flow).
+ * Secret — validated at the API boundary, kept in memory only, never persisted or logged.
+ */
+export const SalesforceCredentialsSchema = z.object({
+  url: z.string().min(1),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  token: z.string().optional(),
+});
+export type SalesforceCredentialsInput = z.infer<typeof SalesforceCredentialsSchema>;
+
 /** A strict lock capturing the single source-of-truth datasource for a session. */
 export const DatasourceLockSchema = z.object({
   datasourceId: z.string().min(1),
@@ -144,6 +156,16 @@ export const TextFormatSchema = z.object({
 });
 export type TextFormat = z.infer<typeof TextFormatSchema>;
 
+/**
+ * How a worksheet fits inside its dashboard zone — Tableau's per-sheet "Fit" control.
+ *  - standard    : the sheet's natural size (scrollable when larger than the zone).
+ *  - fit_width   : scale to fill the zone WIDTH.
+ *  - fit_height  : scale to fill the zone HEIGHT.
+ *  - entire_view : scale the WHOLE viz to fit the zone (Tableau's "Entire View").
+ */
+export const FitModeSchema = z.enum(['standard', 'fit_width', 'fit_height', 'entire_view']);
+export type FitMode = z.infer<typeof FitModeSchema>;
+
 export const FormattingSpecSchema = z.object({
   numberFormat: z.string().optional(),
   showLabels: z.boolean().optional(),
@@ -151,6 +173,8 @@ export const FormattingSpecSchema = z.object({
   title: z.string().optional(),
   /** Font/size/color for the worksheet title (defaults to bold Tableau Bold 12). */
   titleFormat: TextFormatSchema.optional(),
+  /** Per-sheet "Fit" inside its dashboard zone. Defaults by chart type when omitted. */
+  fit: FitModeSchema.optional(),
   /**
    * Field placed on the COLOR mark (user-selectable before approval). A dimension colors
    * by category (discrete); a measure colors by value (continuous). When omitted, the

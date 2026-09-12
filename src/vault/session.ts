@@ -11,7 +11,26 @@ import { randomBytes } from 'node:crypto';
 import { getConfig } from '../config/env.js';
 import type { DatasourceLock, TableauProjectContext } from '../schemas/common.js';
 import type { DashboardPlan } from '../schemas/dashboardPlan.js';
+import type { SalesforceCredentials, SalesforceSession, SalesforceTable } from '../salesforce/client.js';
+import { sweepPendingOauth } from '../salesforce/oauthStore.js';
+import type { DatasourceMetadata } from '../tableau/types.js';
 import type { TableauCredentials } from './types.js';
+
+/**
+ * Transient connector state for the "Build datasource" flow. Secret material
+ * (credentials, access token) is memory-only, never persisted, logged, or sent to
+ * the client. Cleared once the datasource is published (or on logout).
+ */
+export interface ConnectorState {
+  salesforce?: {
+    /** Raw credentials — kept only for the duration of the build to embed on publish. */
+    creds: SalesforceCredentials;
+    /** Live Salesforce session (instance URL + access token). */
+    sfSession: SalesforceSession;
+    /** Objects listed for the user to choose from. */
+    tables: SalesforceTable[];
+  };
+}
 
 /** Live Tableau REST authentication — short-lived, secret, memory-only. */
 export interface TableauAuthState {
@@ -27,6 +46,12 @@ export interface TableauAuthState {
 export interface FlowContext {
   projectContext?: TableauProjectContext;
   datasourceLock?: DatasourceLock;
+  /**
+   * Datasource field metadata captured at build time (e.g. from a Salesforce
+   * `describe`), keyed by datasourceId. Non-secret. Lets the dashboard flow use real
+   * fields immediately instead of waiting on Tableau's async Metadata API indexing.
+   */
+  connectorMetadata?: Record<string, DatasourceMetadata>;
   plan?: DashboardPlan;
   approvedPlanHash?: string;
   workbook?: {
@@ -48,6 +73,8 @@ export interface Session {
   credentials?: TableauCredentials;
   /** Live Tableau REST auth — memory only. */
   tableauAuth?: TableauAuthState;
+  /** Transient connector build state (e.g. Salesforce) — memory only. */
+  connectors?: ConnectorState;
   flow: FlowContext;
 }
 
@@ -96,6 +123,7 @@ export function destroySession(id: string): void {
     s.vaultKey.fill(0);
     s.credentials = undefined;
     s.tableauAuth = undefined;
+    s.connectors = undefined;
   }
   sessions.delete(id);
 }
@@ -107,6 +135,7 @@ export function startSessionSweeper(intervalMs = 60_000): () => void {
     for (const [id, s] of sessions) {
       if (s.expiresAt < now) destroySession(id);
     }
+    sweepPendingOauth();
   }, intervalMs);
   handle.unref?.();
   return () => clearInterval(handle);

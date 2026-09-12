@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { api } from '../api';
-import type { CreationResult, PlanningResult, ReferenceLineView, SessionContext, WorksheetSpecView } from '../types';
+import type { CreationResult, FitMode, PlanningResult, ReferenceLineView, SessionContext, WorksheetSpecView } from '../types';
 import { Busy, ErrorPanel } from './common';
 
 /**
@@ -701,6 +701,8 @@ function WorksheetFormatControls({
   const [colorRows, setColorRows] = useState<{ value: string; color: string }[]>(ws.colorMap?.colors ?? []);
   // Color-mark field: default to the current selection, else the first dimension.
   const [colorMarkField, setColorMarkField] = useState<string>(ws.formatting?.colorField ?? dims[0] ?? '');
+  // Per-sheet "Fit" inside its dashboard zone. '' = chart-type default.
+  const [fit, setFit] = useState<FitMode | ''>(ws.formatting?.fit ?? '');
 
   // KPI cards only support a headline value; the chart-level controls don't apply.
   if (isKpi) return null;
@@ -727,6 +729,7 @@ function WorksheetFormatControls({
     const cleanColors = colorRows.filter((r) => r.value.trim() && /^#[0-9a-fA-F]{6}$/.test(r.color));
     opts.colorMap = colorField && cleanColors.length ? { field: colorField, colors: cleanColors } : null;
     opts.colorField = colorMarkField || '';
+    opts.fit = fit || null; // null clears back to the chart-type default
     onApply(opts);
   };
 
@@ -736,6 +739,17 @@ function WorksheetFormatControls({
     <details style={{ marginTop: 6 }}>
       <summary className="small" style={{ cursor: 'pointer' }}>Formatting</summary>
       <div style={{ marginTop: 6 }}>
+        <div className="row small" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
+          <span>Fit</span>
+          <select value={fit} onChange={(e) => setFit(e.target.value as FitMode | '')}>
+            <option value="">Default (by chart type)</option>
+            <option value="standard">Standard</option>
+            <option value="fit_width">Fit Width</option>
+            <option value="fit_height">Fit Height</option>
+            <option value="entire_view">Entire View</option>
+          </select>
+          <span className="muted">how the sheet fills its dashboard tile</span>
+        </div>
         <div className="row small" style={{ gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 }}>
           <span>Color by</span>
           <select value={colorMarkField} onChange={(e) => setColorMarkField(e.target.value)}>

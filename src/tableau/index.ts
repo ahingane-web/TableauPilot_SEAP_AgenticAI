@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DashboardPlan } from '../schemas/dashboardPlan.js';
-import type { DatasourceLock, TableauProjectContext } from '../schemas/common.js';
+import type { DatasourceLock, FieldRole, TableauProjectContext } from '../schemas/common.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { assertApproved, assertDatasourceLock, assertProjectMatch } from '../validation/guards.js';
@@ -36,9 +36,26 @@ import {
   checkWorkbookEditPermission,
 } from './permissions/index.js';
 import { publishWorkbook } from './publishing/index.js';
+import { publishDatasource } from './publishing/datasource.js';
+import { randomBytes } from 'node:crypto';
+import { generateSalesforceTds, salesforceToTwbDataType, salesforceToHyperType } from './authoring/tdsGenerator.js';
+import { buildExtractTdsx, type ExtractColumn } from './publishing/hyperPackager.js';
+
+/** Result of building/publishing a Salesforce extract datasource (API/UI contract). */
+export interface ExtractResult {
+  state: 'succeeded' | 'failed' | 'cancelled' | 'pending';
+  message?: string;
+}
+import * as Salesforce from '../salesforce/client.js';
+import type { SalesforceCredentials, SalesforceField, SalesforceSession, SalesforceTable } from '../salesforce/client.js';
+import * as SalesforceOauth from '../salesforce/oauth.js';
+import { putPendingOauth, takePendingOauth } from '../salesforce/oauthStore.js';
+import { getConfig } from '../config/env.js';
+import { getSession } from '../vault/session.js';
 import { TableauClient } from './tableauClient.js';
 import { verifyWorkbook } from './verification/index.js';
 import type {
+  DatasourceField,
   DatasourceMetadata,
   PermissionResult,
   PublishResult,
@@ -78,6 +95,64 @@ function siteId(session: Session): string {
 function requireAuth(session: Session) {
   if (!session.tableauAuth) throw new AppError('AUTH_REQUIRED', 'Not connected to Tableau Cloud. Connect first.');
   return session.tableauAuth;
+}
+
+/**
+ * Normalize a user-entered Salesforce host into a bare hostname for the connection
+ * `server` attribute, e.g. `https://your-domain.my.salesforce.com/` -> `your-domain.my.salesforce.com`.
+ */
+function normalizeSalesforceHost(raw: string): string {
+  return String(raw ?? '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/.*$/, '')
+    .toLowerCase();
+}
+
+/** Map a Salesforce field (from `describe`) to a Tableau datasource field. */
+function salesforceFieldToDatasourceField(f: SalesforceField): DatasourceField {
+  const twb = salesforceToTwbDataType(f.type); // string|integer|real|boolean|date|datetime
+  const dataType =
+    twb === 'integer' ? 'INTEGER' : twb === 'real' ? 'REAL' : twb === 'boolean' ? 'BOOLEAN' : twb === 'date' ? 'DATE' : twb === 'datetime' ? 'DATETIME' : 'STRING';
+  const isDate = twb === 'date' || twb === 'datetime';
+  const role: FieldRole = twb === 'integer' || twb === 'real' ? 'measure' : 'dimension';
+  return { name: f.name, role, dataType, isDate, fieldType: 'ColumnField' };
+}
+
+/** Build DatasourceMetadata from a Salesforce object's described fields. */
+function salesforceFieldsToMetadata(
+  datasourceId: string,
+  datasourceName: string,
+  fields: SalesforceField[],
+): DatasourceMetadata {
+  const seen = new Set<string>();
+  const mapped: DatasourceField[] = [];
+  for (const f of fields) {
+    const name = f.name?.trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    mapped.push(salesforceFieldToDatasourceField(f));
+  }
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+/** List Salesforce objects and store the transient connector state on the session. */
+async function storeSalesforceConnectorState(
+  session: Session,
+  creds: SalesforceCredentials,
+  sfSession: SalesforceSession,
+): Promise<SalesforceTable[]> {
+  const tables = await Salesforce.listObjects(sfSession);
+  session.connectors = { ...(session.connectors ?? {}), salesforce: { creds, sfSession, tables } };
+  return tables;
 }
 
 export const TableauService = {
@@ -122,6 +197,10 @@ export const TableauService = {
   },
 
   async getMetadata(session: Session, datasourceId: string, datasourceName: string): Promise<DatasourceMetadata> {
+    // Prefer fields captured at build time (e.g. Salesforce `describe`) so a freshly
+    // built datasource is usable immediately, without waiting on Metadata API indexing.
+    const cached = session.flow.connectorMetadata?.[datasourceId];
+    if (cached && cached.fields.length > 0) return cached;
     return getDatasourceMetadata(getClient(session), datasourceId, datasourceName);
   },
 
@@ -153,6 +232,232 @@ export const TableauService = {
     session.flow.plan = undefined;
     session.flow.approvedPlanHash = undefined;
     session.flow.workbook = undefined;
+  },
+
+  // ---------------------------------------------------------------------------
+  // Build datasource (connector flow). These operate BEFORE the datasource lock:
+  // they connect to a source (Salesforce), publish a new datasource to Tableau
+  // Cloud, then converge on `lockDatasource` so the existing dashboard-building
+  // flow runs unchanged on the freshly built datasource.
+  // ---------------------------------------------------------------------------
+
+  /** The connectors the Build-datasource flow supports. */
+  listConnectors(): Array<{ id: string; label: string }> {
+    return [{ id: 'salesforce', label: 'Salesforce' }];
+  },
+
+  /**
+   * Connect to Salesforce with username/password and list its queryable objects.
+   * The live Salesforce session + credentials are stored transiently on the
+   * (memory-only) session so a subsequent publish can embed the connection
+   * credentials. Nothing is logged.
+   */
+  async salesforceListTables(session: Session, creds: SalesforceCredentials): Promise<SalesforceTable[]> {
+    requireAuth(session); // must be connected to Tableau first (publish target).
+    const sfSession = await Salesforce.login(creds);
+    return storeSalesforceConnectorState(session, creds, sfSession);
+  },
+
+  /**
+   * Begin an interactive Salesforce OAuth (browser sign-in) authorization. Returns
+   * the authorize URL the client should open in a popup, plus the callback URL that
+   * must be registered on the Connected App. The PKCE verifier + client details are
+   * stored transiently, keyed by an opaque `state`, so the header-less OAuth
+   * callback can be routed back to this session.
+   */
+  salesforceOauthStart(
+    session: Session,
+    input: { url: string; clientId?: string; clientSecret?: string },
+  ): { authUrl: string; redirectUri: string } {
+    requireAuth(session);
+    const cfg = getConfig().salesforce;
+    // Prefer a server-configured Connected App (Tableau-connector-like UX where the
+    // user only clicks "Sign in"). Fall back to client-supplied app credentials.
+    const clientId = input.clientId || cfg.oauthClientId;
+    const clientSecret = input.clientSecret || cfg.oauthClientSecret;
+    if (!clientId) {
+      throw new AppError(
+        'CONNECTOR_API',
+        'Salesforce browser sign-in is not configured. Set SALESFORCE_OAUTH_CLIENT_ID (and optionally SALESFORCE_OAUTH_CLIENT_SECRET) on the server, or use username/password.',
+      );
+    }
+    const redirectUri = cfg.oauthRedirectUri;
+    const state = SalesforceOauth.generateState();
+    const pkce = SalesforceOauth.generatePkce();
+    putPendingOauth(state, {
+      sessionId: session.id,
+      loginUrl: input.url,
+      clientId,
+      clientSecret,
+      redirectUri,
+      codeVerifier: pkce.verifier,
+    });
+    const authUrl = SalesforceOauth.buildAuthorizeUrl({
+      loginUrl: input.url,
+      clientId,
+      redirectUri,
+      state,
+      codeChallenge: pkce.challenge,
+    });
+    return { authUrl, redirectUri };
+  },
+
+  /**
+   * Complete an interactive Salesforce OAuth authorization from the callback. Looks
+   * up the originating session by `state` (the callback has no session header),
+   * exchanges the code for a token, lists objects, and stores the transient
+   * connector state. Returns the resolved session id so the caller can proceed.
+   */
+  async completeSalesforceOauth(params: { code: string; state: string }): Promise<{ sessionId: string }> {
+    const pending = takePendingOauth(params.state);
+    if (!pending) {
+      throw new AppError('AUTH_FAILED', 'This Salesforce sign-in link has expired or is invalid. Try again.');
+    }
+    const session = getSession(pending.sessionId);
+    if (!session) {
+      throw new AppError('AUTH_REQUIRED', 'Your session expired during Salesforce sign-in. Unlock your vault and retry.');
+    }
+    const token = await SalesforceOauth.exchangeCodeForToken({
+      loginUrl: pending.loginUrl,
+      clientId: pending.clientId,
+      clientSecret: pending.clientSecret,
+      redirectUri: pending.redirectUri,
+      code: params.code,
+      codeVerifier: pending.codeVerifier,
+    });
+    const { username } = await SalesforceOauth.fetchUserInfo(token);
+    const sfSession = SalesforceOauth.sessionFromToken(token);
+    // Password is not applicable for an OAuth-connected source; store the resolved
+    // username + login origin so the datasource can be generated. Publishing should
+    // use the OAuth credential mode (embed a saved Salesforce OAuth credential).
+    const creds: SalesforceCredentials = { url: pending.loginUrl, username, password: '' };
+    await storeSalesforceConnectorState(session, creds, sfSession);
+    return { sessionId: session.id };
+  },
+
+  /** The tables listed for the current Salesforce connector session (non-secret). */
+  salesforceListedTables(session: Session): SalesforceTable[] {
+    return session.connectors?.salesforce?.tables ?? [];
+  },
+
+  /**
+   * Build a Salesforce EXTRACT datasource for the chosen object and publish it to the
+   * given Tableau Cloud project, then lock it as the session's source of truth for the
+   * downstream dashboard flow.
+   *
+   * The Salesforce credentials are used transiently to `describe` the object and to
+   * `query` its rows; those rows are materialized into a local `.hyper` (via the Python
+   * Hyper sidecar) and packaged into a `.tdsx`. The datasource is published with NO
+   * embedded credentials, so it is a static extract: viewable immediately, but not
+   * refreshable on Tableau Cloud without re-publishing.
+   */
+  async buildAndPublishSalesforceDatasource(
+    session: Session,
+    input: {
+      /** Salesforce credentials used ONLY to read + extract the object (describe/query). Not embedded. */
+      credentials: SalesforceCredentials;
+      /** Salesforce object (SObject) API name, e.g. `Account` or `My_Object__c`. */
+      object: string;
+      projectId: string;
+      datasourceName: string;
+      overwrite?: boolean;
+      /** Emit `server-oauth='server-custom'` (default true — matches the reference). */
+      serverOauthCustom?: boolean;
+    },
+  ): Promise<{
+    datasource: TableauDatasource;
+    lock: DatasourceLock;
+    projectContext: TableauProjectContext;
+    extract: ExtractResult;
+  }> {
+    requireAuth(session);
+
+    const object = String(input.object ?? '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object)) {
+      throw new AppError(
+        'VALIDATION',
+        `Invalid Salesforce object name "${input.object}". Use the SObject API name, e.g. Account or My_Object__c.`,
+      );
+    }
+    const username = String(input.credentials.username ?? '').trim();
+    if (!username) {
+      throw new AppError('VALIDATION', 'A Salesforce username is required.');
+    }
+
+    const project = (await this.listProjects(session)).find((p) => p.id === input.projectId);
+    if (!project) {
+      throw new AppError('NOT_FOUND', 'Target project not found among your accessible projects.');
+    }
+
+    // Sign in to Salesforce to read the object schema AND pull the rows for the extract.
+    // The session/token is used transiently; NO Salesforce credential is embedded into
+    // the published datasource (the extract is static — viewable, not refreshable).
+    const sfSession = await Salesforce.login(input.credentials);
+    const serverHost = normalizeSalesforceHost(sfSession.instanceUrl);
+    const fields = await Salesforce.describeObject(sfSession, object);
+    if (fields.length === 0) {
+      throw new AppError('CONNECTOR_API', `Salesforce object "${object}" exposes no extractable fields.`);
+    }
+    const fieldNames = fields.map((f) => f.name);
+    const maxRows = getConfig().hyper.maxRows;
+    const rows = await Salesforce.queryRecords(sfSession, object, fieldNames, maxRows);
+
+    // Build the `.tds` with an <extract> element backed by a locally materialized
+    // `.hyper` (bundled in the `.tdsx` at this exact path).
+    const hyperName = `federated_${randomBytes(10).toString('hex')}.hyper`;
+    const tdsXml = generateSalesforceTds({
+      datasourceName: input.datasourceName,
+      serverHost,
+      username,
+      object,
+      authMode: 'oauth',
+      serverOauthCustom: input.serverOauthCustom,
+      fields: fields.map((f) => ({ name: f.name, salesforceType: f.type, nillable: f.nillable })),
+      extract: { hyperDbname: `Data/Extracts/${hyperName}` },
+    });
+
+    // Materialize the extract locally and package a `.tdsx` (Python Hyper sidecar).
+    const schema: ExtractColumn[] = fields.map((f) => ({ name: f.name, type: salesforceToHyperType(f.type) }));
+    const tdsxBuffer = await buildExtractTdsx({ tdsXml, object, hyperName, schema, rows });
+
+    // Publish the packaged extract. NO connection credentials are embedded — the
+    // datasource renders entirely from the bundled `.hyper`.
+    const published = await publishDatasource(getClient(session), {
+      siteId: siteId(session),
+      projectId: project.id,
+      datasourceName: input.datasourceName,
+      tdsxBuffer,
+      overwrite: input.overwrite,
+    });
+
+    // Publishing target for the eventual workbook = where we published the datasource.
+    this.setProjectContext(session, { siteId: siteId(session), projectId: project.id, projectName: project.name });
+
+    const ds: TableauDatasource = {
+      id: published.id,
+      name: published.name,
+      contentUrl: published.contentUrl,
+      projectId: published.projectId,
+      projectName: published.projectName,
+    };
+    const lock = this.lockDatasource(session, ds);
+
+    // Cache the described fields so the dashboard flow has real fields IMMEDIATELY,
+    // without waiting on Tableau's async Metadata API indexing of the new datasource.
+    session.flow.connectorMetadata = {
+      ...(session.flow.connectorMetadata ?? {}),
+      [ds.id]: salesforceFieldsToMetadata(ds.id, ds.name, fields),
+    };
+
+    // Discard any transient connector state now that publishing is complete.
+    session.connectors = undefined;
+
+    const rowsCapped = rows.length >= maxRows;
+    const extract: ExtractResult = {
+      state: 'succeeded',
+      message: `Extract built with ${rows.length.toLocaleString()} row(s)${rowsCapped ? ` (capped at ${maxRows.toLocaleString()})` : ''}.`,
+    };
+    return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract };
   },
 
   async checkProjectPublish(session: Session, project: TableauProjectContext): Promise<PermissionResult> {

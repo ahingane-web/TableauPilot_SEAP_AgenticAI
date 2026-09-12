@@ -84,12 +84,15 @@ export interface GrandTotalsView {
   column: boolean;
 }
 
+export type FitMode = 'standard' | 'fit_width' | 'fit_height' | 'entire_view';
+
 export interface WorksheetFormattingView {
   showLabels?: boolean;
   colorPalette?: string;
   title?: string;
   titleFormat?: TextFormat;
   colorField?: string;
+  fit?: FitMode;
 }
 
 export interface WorksheetSpecView {

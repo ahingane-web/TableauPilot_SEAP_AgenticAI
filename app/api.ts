@@ -5,6 +5,7 @@ import type {
   CredentialSummary,
   DatasourceMetadataView,
   EmbedInfo,
+  FitMode,
   GrandTotalsView,
   NamedItem,
   PlanningResult,
@@ -23,6 +24,8 @@ export interface WorksheetFormatOpts {
   titleFormat?: TextFormat | null;
   /** Field on the color mark ('' clears it). */
   colorField?: string | null;
+  /** Per-sheet fit inside its dashboard zone (null clears to the chart-type default). */
+  fit?: FitMode | null;
 }
 
 const SID_KEY = 'tp_sid';
@@ -113,6 +116,35 @@ export const api = {
     }),
   unlockDatasource: () => req<{ datasourceLock: null }>('/api/tableau/unlock-datasource', { method: 'POST' }),
   context: () => req<SessionContext>('/api/tableau/context'),
+
+  // ---- Connectors (Build datasource flow) ----
+  connectors: () =>
+    req<{ items: { id: string; label: string; oauthRedirectUri?: string; oauthConfigured?: boolean }[] }>(
+      '/api/connectors',
+    ),
+  salesforceConnect: (creds: { url: string; username: string; password: string; token?: string }) =>
+    req<{ tables: { name: string; label: string }[] }>('/api/connectors/salesforce/connect', { method: 'POST', body: creds }),
+  // Interactive OAuth (browser sign-in): start returns the authorize URL to open in a popup.
+  salesforceOauthStart: (body: { url: string; clientId?: string; clientSecret?: string }) =>
+    req<{ authUrl: string; redirectUri: string }>('/api/connectors/salesforce/oauth/start', { method: 'POST', body }),
+  salesforceTables: () =>
+    req<{ tables: { name: string; label: string }[] }>('/api/connectors/salesforce/tables'),
+  // Build a live Salesforce datasource. Credentials are used only to read the object
+  // schema (describe); publishing uses the SAVED Salesforce OAuth credential on Tableau Cloud.
+  salesforcePublish: (body: {
+    credentials: { url: string; username: string; password: string; token?: string };
+    object: string;
+    projectId: string;
+    datasourceName: string;
+    overwrite?: boolean;
+    serverOauthCustom?: boolean;
+  }) =>
+    req<
+      SessionContext & {
+        datasource: { id: string; name: string; projectName?: string };
+        extract: { state: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
+      }
+    >('/api/connectors/salesforce/publish', { method: 'POST', body }),
 
   plan: (request: string, workbookName?: string) =>
     req<PlanningResult>('/api/dashboard/plan', { method: 'POST', body: { request, workbookName } }),

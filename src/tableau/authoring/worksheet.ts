@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import type { WorksheetSpec, MeasureRef } from '../../schemas/worksheetSpec.js';
 import type { DateDerivation } from '../../schemas/common.js';
 import type { DatasourceField, DatasourceMetadata } from '../types.js';
-import { escapeXml, twbDataType } from './xml.js';
+import { escapeXml, twbDataType, measureDatatype } from './xml.js';
 import { resolvePill, type ResolvedPill, type TwbDataType } from './pill.js';
 import { getChartRecipe, type ChartRecipe } from './chartRegistry.js';
 import { buildNumberFormat, looksLikeCurrency } from './numberFormat.js';
@@ -409,8 +409,7 @@ function makeMeasurePill(
   discrete = false,
   forceAggregated = false,
 ): ResolvedPill {
-  const base = twbDataType(field);
-  const dataType: TwbDataType = base === 'string' ? 'real' : base;
+  const dataType: TwbDataType = measureDatatype(twbDataType(field));
   const format = resolveMeasureFormat(m);
   return resolvePill({
     name: m.field,

@@ -20,7 +20,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "harness": "tsx scripts/generateSample.ts"
+    "harness": "tsx scripts/generateSample.ts",
+    "setup:hyper": "python3 -m venv .venv-hyper && .venv-hyper/bin/python -m pip install --upgrade pip && .venv-hyper/bin/python -m pip install -r scripts/hyper/requirements.txt"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.46",

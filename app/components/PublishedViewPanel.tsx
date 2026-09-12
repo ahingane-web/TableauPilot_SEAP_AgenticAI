@@ -96,6 +96,11 @@ export function PublishedViewPanel({ ctx }: { ctx: SessionContext }): React.Reac
     viz.setAttribute('toolbar', 'hidden');
     viz.style.width = '100%';
     viz.style.height = '100%';
+    // Keep a usable minimum so a fixed-size dashboard isn't crushed into the pane and
+    // clipped: when the preview pane is smaller than this, `.embed-body` scrolls so the
+    // whole dashboard stays reachable. Widening the pane (drag splitter) removes the scroll.
+    viz.style.minWidth = '760px';
+    viz.style.minHeight = '640px';
     container.appendChild(viz);
   }
 

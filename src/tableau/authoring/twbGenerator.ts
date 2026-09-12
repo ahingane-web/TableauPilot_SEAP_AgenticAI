@@ -20,7 +20,8 @@ import type { WorksheetSpec } from '../../schemas/worksheetSpec.js';
 import type { FilterSpec } from '../../schemas/filterSpec.js';
 import type { ParameterSpec } from '../../schemas/parameterSpec.js';
 import type { DatasourceMetadata } from '../types.js';
-import { escapeXml, twbDataType, localName } from './xml.js';
+import type { FitMode } from '../../schemas/common.js';
+import { escapeXml, twbDataType, localName, measureDatatype } from './xml.js';
 import { renderWorksheet, type AppliedFilter } from './worksheet.js';
 import { resolveFilter } from './filters.js';
 import { resolveParameters, renderParametersDatasource, type ResolvedParameter } from './parameters.js';
@@ -97,7 +98,7 @@ function renderColumns(plan: DashboardPlan, metadata: DatasourceMetadata, calcs:
   }
   for (const name of measures) {
     const field = byName.get(name);
-    const dt = twbDataType(field) === 'string' ? 'real' : twbDataType(field);
+    const dt = measureDatatype(twbDataType(field));
     lines.push(
       `      <column caption='${escapeXml(name)}' datatype='${dt}' name='${escapeXml(localName(name))}' role='measure' type='quantitative' />`,
     );
@@ -164,7 +165,7 @@ function renderMetadataRecords(plan: DashboardPlan, metadata: DatasourceMetadata
   const physical = entries.map(({ name, role }, i) => {
     const field = byName.get(name);
     let localType = twbDataType(field);
-    if (role === 'measure' && localType === 'string') localType = 'real';
+    if (role === 'measure') localType = measureDatatype(localType);
     const remote = escapeXml(name);
     return [
       `        <metadata-record class='column'>`,
@@ -406,6 +407,25 @@ function partitionH(rect: Rect, weights: number[]): Rect[] {
 /** `x/y/w/h` attribute string for a zone. */
 function dims(r: Rect): string {
   return `h='${r.h}' w='${r.w}' x='${r.x}' y='${r.y}'`;
+}
+
+/**
+ * The `<zoom>` fragment (10-space indent) for a sheet's dashboard viewpoint, per its
+ * "Fit" setting. "Standard" emits NO zoom (Tableau's default, a scrollable natural size);
+ * the others map to Tableau's zoom types.
+ */
+function fitZoomXml(fit: FitMode): string {
+  switch (fit) {
+    case 'standard':
+      return '';
+    case 'fit_width':
+      return `\n        <zoom type='fit-width' />`;
+    case 'fit_height':
+      return `\n        <zoom type='fit-height' />`;
+    case 'entire_view':
+    default:
+      return `\n        <zoom type='entire-view' />`;
+  }
 }
 
 /**
@@ -797,6 +817,17 @@ export function generateTwb(
   // produced explicit `dashboards[]`, emit exactly those; otherwise synthesize a single
   // board from `layout` + `dashboardName` (backward-compatible with single-dashboard plans).
   const kpiNames = new Set(plan.worksheets.filter((w) => w.chartType === 'kpi').map((w) => w.name));
+  // Per-sheet "Fit" (Tableau viewpoint <zoom>). The user can override it in the plan;
+  // otherwise detail/table sheets default to "Standard" (a scrollable table) and every
+  // other chart defaults to "Entire View" (fit the whole viz to its dashboard zone).
+  const zoomByName = new Map<string, string>(
+    plan.worksheets.map((w) => {
+      const explicit = w.formatting?.fit;
+      const isTable = w.chartType === 'detail' || w.chartType === 'text_table';
+      const fit = explicit ?? (isTable ? 'standard' : 'entire_view');
+      return [w.name, fitZoomXml(fit)] as const;
+    }),
+  );
   const boards: DashboardSpec[] =
     plan.dashboards.length > 0 ? plan.dashboards : [{ ...plan.layout, name: plan.dashboardName }];
 
@@ -1039,9 +1070,13 @@ export function generateTwb(
 
     boardXmls.push(renderDashboard(board, kpiNames, nameMap, items, controls));
 
-    // Dashboard window with a viewpoint per placed sheet.
+    // Dashboard window with a viewpoint per placed sheet. Each sheet's fit is its chosen
+    // (or defaulted) <zoom>; "Standard" fit emits no zoom element.
     const viewpoints = placedList
-      .map((n) => `      <viewpoint name='${escapeXml(finalName(n))}'>\n        <zoom type='entire-view' />\n      </viewpoint>`)
+      .map((n) => {
+        const zoom = zoomByName.get(n) ?? `\n        <zoom type='entire-view' />`;
+        return `      <viewpoint name='${escapeXml(finalName(n))}'>${zoom}\n      </viewpoint>`;
+      })
       .join('\n');
     boardWindows.push(
       [

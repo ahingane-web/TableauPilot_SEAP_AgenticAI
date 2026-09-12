@@ -12,7 +12,7 @@
  */
 import type { FilterSpec } from '../../schemas/filterSpec.js';
 import type { DatasourceField, DatasourceMetadata } from '../types.js';
-import { escapeXml, twbDataType } from './xml.js';
+import { escapeXml, twbDataType, measureDatatype } from './xml.js';
 import { resolvePill, type ResolvedPill, type TwbDataType } from './pill.js';
 
 /** A filter resolved against real metadata, ready to emit on a worksheet + panel. */
@@ -107,7 +107,22 @@ export function resolveFilter(
 
   const ref = pill.ref(dsName);
   const memberLevel = `[${pill.instanceName}]`;
-  const quote = twbDataType(field) === 'string';
+  const fieldType = twbDataType(field);
+  const quote = fieldType === 'string';
+  const isBoolean = fieldType === 'boolean';
+
+  /**
+   * Render a categorical member value for the `member='...'` attribute.
+   * - strings: wrapped in escaped double-quotes (`&quot;City&quot;`).
+   * - booleans: Tableau ONLY parses the unquoted literals `true`/`false`; a plan value
+   *   like `Yes`/`1`/`Important` yields "Error parsing filter", so coerce truthy/falsy
+   *   representations to the canonical literal.
+   * - other (numeric): the raw escaped value.
+   */
+  const renderMember = (v: unknown): string => {
+    if (isBoolean) return booleanMember(v);
+    return quote ? `&quot;${escapeXml(String(v))}&quot;` : escapeXml(String(v));
+  };
 
   // A ranked Top-N / Bottom-N filter over a dimension, ranked by a measure aggregate.
   const isTopN = spec.operator === 'top_n' && !!spec.topN && !isMeasure;
@@ -171,9 +186,7 @@ export function resolveFilter(
     }
 
     if (memberFilter) {
-      const members = spec.values.map((v) =>
-        quote ? `&quot;${escapeXml(String(v))}&quot;` : escapeXml(String(v)),
-      );
+      const members = spec.values.map(renderMember);
       if (members.length === 1) {
         return [
           `          <filter class='categorical' column='${ref}'${attrs}>`,
@@ -222,6 +235,21 @@ export function resolveFilter(
 }
 
 function measureType(field: DatasourceField): TwbDataType {
-  const t = twbDataType(field);
-  return t === 'string' ? 'real' : t;
+  return measureDatatype(twbDataType(field));
+}
+
+const TRUE_TOKENS = new Set(['true', 't', 'yes', 'y', '1']);
+const FALSE_TOKENS = new Set(['false', 'f', 'no', 'n', '0']);
+
+/**
+ * Coerce a plan-supplied boolean filter value to the canonical unquoted `true`/`false`
+ * literal Tableau requires for a boolean member. Anything unrecognized defaults to
+ * `true` so the workbook still loads (a parseable filter beats an "ignored" one).
+ */
+function booleanMember(value: unknown): string {
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  const token = String(value).trim().toLowerCase();
+  if (FALSE_TOKENS.has(token)) return 'false';
+  if (TRUE_TOKENS.has(token)) return 'true';
+  return 'true';
 }

@@ -38,6 +38,7 @@ CHART SELECTION (pick the chart that best communicates the ask):
 - Single headline number → "kpi".
 - Table of numbers → "text_table"; table shaded by a measure → "highlight_table"/"heatmap".
 - A DETAILED / DETAILS / row-level listing ("show all the details", "detail view", "detailed table") → "detail": it puts EVERY field on Rows as DISCRETE pills. List ALL relevant fields (both dimensions AND measures) in "dimensions" and "measures"; they are rendered discrete on Rows.
+  • A DETAILS / DETAIL dashboard is the detail table ONLY. Do NOT add KPI cards, summary tiles, or extra charts to it. Include a KPI (chartType "kpi") ONLY if the user EXPLICITLY asks for a KPI / headline number / summary metric.
 - Geographic field (Country/State/City/Region/Postal) → "symbol_map" or "filled_map".
 - Distribution of one measure → "histogram".
 - MONTHLY time series: use "line" or "area" — the date renders as a CONTINUOUS MONTH(date) axis. Prefer this over a bar-by-year for "monthly" / "by month" / "trend" requests.
@@ -62,7 +63,8 @@ TOP / BOTTOM N (rank charts):
 
 LAYOUT (build a clean, readable board):
 - Set layout.title to a concise dashboard title. Choose layout.columns 2-4.
-- KPI ROWS ARE PURE: put KPI cards (kind "kpi") together in the TOP row and NEVER place a non-KPI chart in a KPI row. Charts (kind "chart") go in their own rows below. Place the most important chart large. Give every worksheet a non-overlapping layout item; use rowSpan/colSpan for emphasis.
+- KPIs ARE OPT-IN: only add KPI cards (chartType "kpi") when the user explicitly asks for KPIs / headline numbers / a summary, or when building a general overview/summary dashboard. NEVER add KPI cards to a DETAILS / detail-table dashboard, or to any dashboard where the user did not ask for them.
+- KPI ROWS ARE PURE: when KPI cards ARE present, put them (kind "kpi") together in the TOP row and NEVER place a non-KPI chart in a KPI row. Charts (kind "chart") go in their own rows below. Place the most important chart large. Give every worksheet a non-overlapping layout item; use rowSpan/colSpan for emphasis.
 - SIZE: set layout.size to the mode the user chose — "automatic" (fits the window), "fixed" (exact width x height), or "range" (scales between minWidth/minHeight and maxWidth/maxHeight). If the user did not specify, use "fixed" 1200x800 but the app will confirm the size with the user before publishing.
 
 MULTIPLE DASHBOARDS (only when the user asks for SEPARATE / MULTIPLE dashboards):

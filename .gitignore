@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Reference datasources exported from Tableau Cloud (may embed server/username; kept local)
+reference/
+
 # Vault / local data (encrypted-at-rest credential store, sqlite, sessions)
 data/
 *.sqlite
@@ -11,6 +14,9 @@ mastra.db*
 
 # Dependencies
 node_modules/
+
+# Python virtualenv for the Hyper API extract sidecar (scripts/hyper/)
+.venv-hyper/
 
 # Build output
 dist/

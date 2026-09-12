@@ -11,7 +11,7 @@
 import { RequestContext } from '@mastra/core/request-context';
 import { dashboardPlannerAgent } from '../agents/dashboardPlannerAgent.js';
 import { DashboardPlanDraftSchema, type DashboardPlanDraft, type DashboardPlan } from '../schemas/dashboardPlan.js';
-import type { TextFormat } from '../schemas/common.js';
+import type { TextFormat, FitMode } from '../schemas/common.js';
 import type { ReferenceLineSpec, ColorMapSpec, GrandTotals } from '../schemas/worksheetSpec.js';
 import { TableauService } from '../tableau/index.js';
 import type { DatasourceMetadata } from '../tableau/types.js';
@@ -497,6 +497,7 @@ export async function updateWorksheetFormatting(
     showLabels?: boolean;
     titleFormat?: TextFormat | null;
     colorField?: string | null;
+    fit?: FitMode | null;
   },
 ): Promise<PlanningResult> {
   const plan = session.flow.plan;
@@ -529,6 +530,7 @@ export async function updateWorksheetFormatting(
     if (cf) checkField(cf, 'A color field');
     ws.formatting = { ...ws.formatting, colorField: cf || undefined };
   }
+  if (opts.fit !== undefined) ws.formatting = { ...ws.formatting, fit: opts.fit ?? undefined };
 
   return refreshPlan(session, 'plan.worksheet_formatting_updated', { worksheet: ws.name }, metadata);
 }

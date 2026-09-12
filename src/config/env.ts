@@ -67,6 +67,31 @@ export interface AppConfig {
       readonly secretValue?: string;
     };
   };
+  readonly salesforce: {
+    /**
+     * OAuth callback URL the browser sign-in flow redirects to. Must be registered
+     * as a Callback URL on the Salesforce Connected App. Defaults to the local API.
+     */
+    readonly oauthRedirectUri: string;
+    /**
+     * A pre-registered Salesforce Connected App used for browser sign-in, so the
+     * UI can offer a single "Sign in with Salesforce" button (like Tableau's own
+     * connector) instead of asking the user for a Consumer Key/Secret. Optional:
+     * if unset, the client may supply these per request.
+     */
+    readonly oauthClientId?: string;
+    readonly oauthClientSecret?: string;
+  };
+  readonly hyper: {
+    /**
+     * Python interpreter (with `tableauhyperapi` installed) used to materialize a
+     * Salesforce extract `.hyper` and package the `.tdsx`. Defaults to the local
+     * virtualenv created by `npm run setup:hyper`. Set HYPER_PYTHON to override.
+     */
+    readonly python: string;
+    /** Safety cap on rows pulled into a single extract build. */
+    readonly maxRows: number;
+  };
   readonly vault: {
     readonly pepper: string;
     readonly dataPath: string;
@@ -103,6 +128,7 @@ export function getConfig(): AppConfig {
 
   const provider = (str('LLM_PROVIDER') ?? 'anthropic') as LlmProvider;
   const logLevel = (str('LOG_LEVEL') ?? 'INFO').toUpperCase() as AppConfig['app']['logLevel'];
+  const apiPort = num('API_PORT', 4000);
 
   cached = {
     llm: {
@@ -126,6 +152,17 @@ export function getConfig(): AppConfig {
         secretValue: str('TABLEAU_CONNECTED_APP_SECRET_VALUE'),
       },
     },
+    salesforce: {
+      oauthRedirectUri:
+        str('SALESFORCE_OAUTH_REDIRECT_URI') ??
+        `http://localhost:${apiPort}/api/connectors/salesforce/oauth/callback`,
+      oauthClientId: str('SALESFORCE_OAUTH_CLIENT_ID'),
+      oauthClientSecret: str('SALESFORCE_OAUTH_CLIENT_SECRET'),
+    },
+    hyper: {
+      python: str('HYPER_PYTHON') ?? resolve(process.cwd(), '.venv-hyper/bin/python'),
+      maxRows: num('HYPER_MAX_ROWS', 100000),
+    },
     vault: {
       pepper: str('VAULT_PEPPER') ?? '',
       dataPath: str('DATA_PATH') ?? './data',
@@ -134,7 +171,7 @@ export function getConfig(): AppConfig {
       sessionTtlSeconds: num('SESSION_TTL_SECONDS', 3600),
     },
     app: {
-      apiPort: num('API_PORT', 4000),
+      apiPort,
       webPort: num('WEB_PORT', 5173),
       corsOrigins: (str('CORS_ORIGINS') ?? 'http://localhost:5173')
         .split(',')
@@ -191,5 +228,7 @@ export function describeConfig(): Record<string, unknown> {
     apiPort: cfg.app.apiPort,
     webPort: cfg.app.webPort,
     logLevel: cfg.app.logLevel,
+    hyperPython: cfg.hyper.python,
+    hyperMaxRows: cfg.hyper.maxRows,
   };
 }

@@ -1,34 +1,46 @@
-# Python Dependency Decision — none
+# Python Dependency Decision — scoped to extract building
 
-**Decision: TableauPilot uses no Python. The entire system is TypeScript / Node.js.**
+**Decision: TableauPilot is TypeScript / Node.js, with ONE narrow exception — a Python
+Hyper API sidecar used solely to materialize Salesforce `.hyper` extracts.**
 
-## Why the question comes up
+## Background
 
-Some Tableau tooling ecosystems lean on Python (e.g. the Hyper API for `.hyper`
-extract manipulation, or `tableauserverclient`). An earlier concept for this project
-even referenced local `.twbx`/extract handling (the now-unused `HYPERD_PATH`,
-`UPLOADS_PATH`, `WORKSPACE_PATH` env fields).
+The system was originally 100% Node with no Python. Auth, discovery, metadata,
+permissions, publishing, verification, workbook `.twb` authoring, JWT minting, and
+embedding are all done through the Tableau REST/Metadata APIs and pure-TypeScript XML
+generation — no Python needed for any of that, and that remains true.
 
-## Why we don't need it
+## Why the exception exists
 
-Our hybrid strategy never manipulates extracts locally:
+Salesforce datasources must be **extract-backed**. Two Node-only paths were tried and
+failed:
 
-- **Auth / discovery / metadata / permissions / publish / verify** — all done through
-  the Tableau **REST + Metadata APIs** over HTTPS, which are language-agnostic. Node's
-  `fetch` + a small multipart helper cover publishing.
-- **Workbook creation** — we generate a **`.twb` (plain XML)**, not a packaged
-  `.twbx`/`.hyper`. XML generation is pure string work in TypeScript
-  (`src/tableau/authoring/twbGenerator.ts`). No Hyper API required because the workbook
-  references a **published datasource** that already lives in Tableau Cloud.
-- **Embedding** — the Embedding API v3 is browser JavaScript.
-- **JWT minting** — HMAC-SHA256 via Node's built-in `crypto`; no external/Python lib.
+1. Publish a live datasource and call REST `createExtract` server-side. On the target
+   Tableau Cloud site this returns `REST API does not support background job type
+   :create_extracts` — the job cannot be polled or completed.
+2. Constrain the server-side extract query via `.tds` column metadata. Still failed
+   (`sf:MALFORMED_QUERY` / unsupported job type).
 
-## Benefits
+Writing a `.hyper` locally (what Tableau Desktop does) is the only reliable option, and
+the **Tableau Hyper API has no Node.js binding** (Python / Java / C++ / .NET only). This
+is exactly the trigger this document always named for revisiting the no-Python stance.
 
-- One language, one toolchain (tsc/vite/vitest/playwright), one runtime.
-- No cross-language IPC, no Python packaging in deploys, smaller attack surface.
-- Mastra is a TypeScript framework, so the agent, tools, and workflows stay in-process.
+## Scope of the Python usage
 
-If a future feature genuinely required local extract creation, the Hyper API (which has
-a C++/Java/Python surface) would be the trigger to revisit this — but the current scope
-does not.
+- One script: [`scripts/hyper/build_tdsx.py`](../scripts/hyper/build_tdsx.py). It reads a
+  column schema + streamed rows from temp files, writes an extract `.hyper`, and zips it
+  with the generated `.tds` into a `.tdsx`. That is the entire surface.
+- Invoked as a subprocess by
+  [`src/tableau/publishing/hyperPackager.ts`](../src/tableau/publishing/hyperPackager.ts).
+  All Salesforce access, `.tds`/`.twb` authoring, and publishing stay in TypeScript.
+- Installed into a local virtualenv via `npm run setup:hyper` (`.venv-hyper/`, gitignored).
+  The interpreter path is configurable via `HYPER_PYTHON`.
+- No secrets or row data are passed on argv — only temp file paths.
+
+## Boundaries preserved
+
+- The published extract embeds **no credentials** (static extract: viewable, not
+  refreshable on Cloud without re-publishing).
+- XML is still generated deterministically in TypeScript, never by the LLM.
+- If a future feature needs richer local extract logic, extend the sidecar rather than
+  spreading Python across the codebase.

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api, getSessionId } from './api';
 import type { CreationResult, SessionContext } from './types';
 import { ConnectionPanel } from './components/ConnectionPanel';
@@ -16,6 +16,38 @@ export function App(): React.ReactElement {
   const [ctx, setCtx] = useState<SessionContext | null>(null);
   const [booting, setBooting] = useState(true);
   const [lastResult, setLastResult] = useState<CreationResult | null>(null);
+
+  // Draggable splitter: the user can widen/narrow the left workflow pane (and thus the
+  // right dashboard-preview pane). `null` means "use the CSS default width".
+  const layoutRef = useRef<HTMLDivElement | null>(null);
+  const [leftWidth, setLeftWidth] = useState<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  useEffect(() => {
+    if (!dragging) return;
+    const MIN_LEFT = 360;
+    const MIN_RIGHT = 360;
+    function onMove(e: MouseEvent): void {
+      const rect = layoutRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const max = rect.width - MIN_RIGHT;
+      const next = Math.min(Math.max(e.clientX - rect.left, MIN_LEFT), Math.max(MIN_LEFT, max));
+      setLeftWidth(next);
+    }
+    function onUp(): void {
+      setDragging(false);
+    }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [dragging]);
 
   useEffect(() => {
     (async () => {
@@ -68,8 +100,8 @@ export function App(): React.ReactElement {
         )}
       </div>
 
-      <div className="layout">
-        <div className="left">
+      <div className="layout" ref={layoutRef}>
+        <div className="left" style={leftWidth != null ? { width: leftWidth, minWidth: 0 } : undefined}>
           {booting ? (
             <div className="panel">Loading…</div>
           ) : !ctx || !ctx.hasCredentials ? (
@@ -82,6 +114,14 @@ export function App(): React.ReactElement {
             </>
           )}
         </div>
+        <div
+          className={`gutter${dragging ? ' dragging' : ''}`}
+          onMouseDown={() => setDragging(true)}
+          onDoubleClick={() => setLeftWidth(null)}
+          role="separator"
+          aria-orientation="vertical"
+          title="Drag to resize — double-click to reset"
+        />
         <div className="right">
           {ctx ? (
             <PublishedViewPanel ctx={ctx} key={lastResult?.workbookId ?? ctx.workbook?.workbookId ?? 'none'} />
