@@ -1,0 +1,54 @@
+---
+description: Read the governance docs before changing anything, and keep all Markdown docs in sync with every change
+alwaysApply: true
+---
+
+# Read the docs FIRST, then keep them updated on EVERY change
+
+## Step 0 — READ before you change anything
+
+Before making **any** code/schema/API/config/UI/behavior change in this repo, first
+**read the governance docs** so you honor the established invariants, conventions, and
+history. At minimum read:
+
+- **`docs/rules.md`** — binding invariants, conventions, security & error rules.
+- **`docs/architecture.md`** — components, data flow, key decisions.
+- **`docs/design.md`** — module interfaces, schemas, algorithms, API routes.
+- **`docs/memory.md`** — newest-first progress log (recent decisions, fixes, gotchas).
+- Plus the topic-specific docs for the area you're touching (`security.md`,
+  `authentication.md`, `python-dependency-decision.md`,
+  `tableau-api-capabilities.md`, `authoring-limitations.md`, `phases.md`, `prd.md`,
+  `README.md`).
+
+Do this at the start of a task (and re-read a doc if your change touches its topic).
+Never contradict a documented invariant without explicitly updating that doc in the same
+change and calling out the reversal.
+
+## Then — update the docs in the SAME change
+
+For **any** change, update the relevant Markdown docs **in the same change** — never leave
+them stale. Treat docs as part of the definition of done.
+
+## What to update (only the ones the change touches)
+
+- **`docs/memory.md`** — add a newest-first entry describing the change; bump the
+  `Last updated:` date and the passing **test count** if it changed.
+- **`docs/design.md`** — module interfaces, schemas, algorithms, and the API route table.
+- **`docs/architecture.md`** — components, data flow, and key technical decisions.
+- **`docs/prd.md`** — product scope, user flows, functional requirements, non-goals.
+- **`docs/phases.md`** — phase status/"done" criteria and the test count.
+- **`README.md`** — setup, env vars, run/usage, API surface.
+- **`docs/rules.md`**, **`docs/security.md`**, **`docs/authentication.md`**,
+  **`docs/python-dependency-decision.md`**, **`docs/tableau-api-capabilities.md`**,
+  **`docs/authoring-limitations.md`** — when the change affects their topic.
+
+## How
+
+- Verify facts against the code (route paths, env var names, exports, defaults) before
+  writing — docs must match reality.
+- Keep every doc's `Last updated:` date current when you edit it.
+- In `memory.md`, newest entries go at the TOP; keep entries concise and factual.
+- If a change contradicts an existing doc claim (e.g. a prior "we never do X"), fix that
+  claim rather than leaving the contradiction.
+- If a change genuinely affects no docs, that is the rare exception — otherwise assume at
+  least `memory.md` needs an entry.

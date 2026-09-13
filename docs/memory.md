@@ -1,7 +1,7 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-09-10.
+> Newest entries at the top of the change log. Last updated: 2026-09-13.
 
 ## Environment facts
 
@@ -21,7 +21,61 @@
 - Phase 6 (authoring generation): ✅ but **binding hardening ongoing**.
 - Phase 8 (publish+verify): 🚧 **blocked on a live Tableau publish error** (details
   below). Code path is complete; Tableau Cloud rejects the generated workbook.
-- Tests: **84 unit/integration passing**; `tsc`/lint/build clean.
+- Phase 15 (Salesforce connector datasource builder): ✅ build + publish work; see the
+  newest entry below.
+- Tests: **190 unit/integration passing**; `tsc`/lint/build clean.
+
+## Feature: Salesforce connector — extract datasource builder (newest first)
+
+A second entry point alongside dashboard authoring: connect to **Salesforce**, model one
+or more objects, and publish an **extract-backed** Tableau datasource. Lives under
+`src/salesforce/*` (SOAP login, REST describe/query, OAuth PKCE) + `src/tableau/authoring/
+tdsGenerator.ts` (`.tds`) + `src/tableau/publishing/hyperPackager.ts` (`.hyper`/`.tdsx`
+via the Python sidecar) + `TableauService.buildAndPublishSalesforceDatasource`. UI is the
+redesigned **`SetupPanel` → SalesforceBuild** (3-step wizard). Routes are under
+`/api/connectors/salesforce/*`.
+
+- **2026-09-13 — Post-publish credential embed + extract refresh step.** After publishing,
+  the orchestration now (1) lists the datasource connection(s) and **embeds the saved
+  Salesforce OAuth credential** (matched by username, `embedPassword='true'`) via
+  `embedDatasourceConnectionCredential`, then (2) triggers a server-side **extract refresh**
+  (`refreshDatasourceNow` → `POST /sites/{site}/datasources/{id}/refresh`) so Cloud records
+  a refresh and re-pulls data with the embedded credential. Both are **best-effort** (a
+  failure never fails the publish; the bundled `.hyper` already holds fresh data).
+  New client helpers in `publishing/datasource.ts`: `listDatasourceConnections`,
+  `embedDatasourceConnectionCredential`, `refreshDatasourceNow` + `TableauClient.putJson`.
+  - **Caveat (documented in code):** for a **multi-object** datasource (relationships/
+    joins), a server-side refresh makes Tableau REBUILD the extract with its own engine,
+    which may collapse it to the first table ("migrating data… only 1st table"). The
+    bundled extract at publish time always contains all tables. Earlier this refresh was
+    gated to single-object only; per user request it now runs for all — flip the guard in
+    `buildAndPublishSalesforceDatasource` back to `if (!isMulti)` if the collapse recurs.
+- **2026-09-13 — Relationship vs Join modes.** `SalesforceBuildSchema.mode`
+  (`'relationship' | 'join'`, default `relationship`). Relationship mode →
+  `generateSalesforceRelationshipsTds` (Tableau object-graph: `<objects>` +
+  `<relationships>`, cardinality via `unique-key`/`is-db-set-unique-key` end-point flags).
+  Join mode → `generateSalesforcePhysicalJoinTds` (left-deep `<relation type='join'
+  join='left|right|inner|full'>` + `<clause type='join'>`). Per-relationship `cardinality`
+  (default `many-to-many`) drives relationship mode; `joinType` (default `left`) drives
+  join mode. Verified structurally against `reference/sample_datasource_DataModelling.tds`.
+- **2026-09-13 — Redesigned SetupPanel UI.** Salesforce builder rebuilt as a 3-step wizard
+  (Connect → Model → Publish) on the dark theme: header badge + step tracker, section
+  cards (Model/Publish dimmed until connected), a toggle switch for "Combine multiple
+  objects", a segmented control for Relationship|Join, and per-table cards with an inline
+  `field = field` row. New classes in `app/styles.css` (`.sf*`, `.segmented`, `.switch`,
+  `.tablecard`, `.joinrow`, `.checkline`, `.addbtn`).
+- **Duplicate field name fix.** Multi-object `.tds` uses **qualified** `[Object.Field]`
+  local-names (remote-name stays the raw API name) so common fields (`Id`, `Name`,
+  `AccountId`) don't collide across objects (previously: extract-refresh
+  `TableauException: Duplicate field name 'Id'`).
+- **Salesforce REST API version auto-discovery.** After SOAP login,
+  `resolveLatestApiVersion()` queries the unversioned `/services/data/` endpoint to pick
+  the highest version the org actually serves (fixes `404 on /services/data/v59.0/...` on
+  orgs where the pinned version hasn't rolled out yet).
+- **Transient session model.** Salesforce creds + live session + listed tables are stored
+  only in-memory on `session.connectors.salesforce` for describe/query/build, and cleared
+  once publishing completes. Salesforce credentials are **never** embedded — the published
+  datasource authenticates via the saved Salesforce credential on Tableau Cloud.
 
 ## Calculation-engineer subagent (ported from Version2, adapted)
 

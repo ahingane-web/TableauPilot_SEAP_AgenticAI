@@ -1,7 +1,7 @@
 # Design — TableauPilot AI
 
 > Living document. Update this whenever module interfaces, schemas, algorithms, or
-> code-level decisions change. Last updated: 2026-09-09.
+> code-level decisions change. Last updated: 2026-09-13.
 
 This is the module-level design. For the big picture see
 [architecture.md](./architecture.md); for binding rules see [rules.md](./rules.md).
@@ -57,6 +57,16 @@ tableauAuth, flow }`; `createSession/getSession/destroySession/startSessionSweep
   `publishing` + `datasource`, injected server-side).
 - Domain specs: `worksheetSpec`, `calculatedFieldSpec`, `filterSpec`, `parameterSpec`,
   `dashboardLayoutSpec`, `publishingSpec`.
+- **Salesforce connector** (in `common.ts`): `SalesforceCredentialsSchema`,
+  `SalesforceObjectNameSchema`/`SalesforceFieldNameSchema` (identifier grammar),
+  `SalesforceCardinalitySchema` (`one-to-one|one-to-many|many-to-one|many-to-many`,
+  default `many-to-many`), `SalesforceJoinTypeSchema` (`inner|left|right|full`, default
+  `left`), `SalesforceBuildModeSchema` (`relationship|join`, default `relationship`),
+  `SalesforceRelationshipSchema` (leftObject/leftField/rightObject/rightField +
+  cardinality + joinType), and `SalesforceBuildSchema` (credentials, tables[min 1],
+  relationships[], mode, projectId, datasourceName, overwrite?, serverOauthCustom?). A
+  `.superRefine` enforces multi-object connectivity: relationships must reference known
+  tables and connect **every** table into one graph (union-find `isConnected`).
 
 **Decision:** the LLM produces a *draft* (no publishing/datasource). The server injects
 the locked datasource + approved project so the model can't redirect output.
@@ -128,6 +138,58 @@ async publishPlan(session, plan, metadata) {
 }
 ```
 
+## 5b. Salesforce connector — extract datasource builder
+
+A second entry point that connects to **Salesforce**, models one or more objects, and
+publishes an **extract-backed** Tableau datasource (the LLM/plan flow is not involved).
+
+**Salesforce client (`src/salesforce/client.ts`)** — `login()` (SOAP username/password +
+optional security token), `resolveLatestApiVersion()` (queries unversioned
+`/services/data/` after login and picks the highest version the org serves — avoids 404s
+when the pinned `SALESFORCE_API_VERSION` hasn't rolled out), `listObjects()`,
+`describeObject()` (field name/label/type), `queryRecords()` (SOQL, per-object row cap).
+
+**Salesforce OAuth (`src/salesforce/{oauth,oauthStore}.ts`)** — interactive browser
+sign-in: `generatePkce`/`generateState`, `buildAuthorizeUrl`, `exchangeCodeForToken`,
+`fetchUserInfo`, `sessionFromToken`; `oauthStore` holds pending PKCE state (swept).
+
+**TDS generation (`src/tableau/authoring/tdsGenerator.ts`)**:
+- `generateSalesforceTds()` — single-object extract `.tds`.
+- `generateSalesforceRelationshipsTds()` — multi-object **relationships** model: a
+  connection-level `<relation type='collection'>` of the objects, an `<object-graph>`
+  with one `<object>` per table (live + `extract` context relations) and one
+  `<relationship>` per edge; cardinality maps to `unique-key`/`is-db-set-unique-key`
+  end-point flags (many-to-one → right unique, one-to-many → left, one-to-one → both,
+  many-to-many → neither).
+- `generateSalesforcePhysicalJoinTds()` — multi-object **physical join**: a left-deep
+  `<relation type='join' join='left|right|inner|full'>` tree with `<clause type='join'>`
+  ON-conditions (mirrored for the extract-side hyper tables). No object-graph.
+- Multi-object metadata uses **qualified `[Object.Field]` local-names** (remote-name stays
+  the raw API name) to avoid duplicate-field-name collisions across objects.
+- Type maps: `salesforceToTwbDataType`, `salesforceToHyperType`.
+
+**Extract packaging (`src/tableau/publishing/hyperPackager.ts`)** — `buildExtractTdsx()`
+writes each object's schema + rows to temp files and shells out to the Python Hyper
+sidecar (`scripts/hyper/build_tdsx.py`, interpreter `HYPER_PYTHON`/`.venv-hyper`) to
+materialize a single `.hyper` (one `Extract."<Object>"` table per object) zipped with the
+`.tds` into a `.tdsx`. No secrets/rows on argv (temp-file paths only). See
+[python-dependency-decision.md](./python-dependency-decision.md).
+
+**Post-publish helpers (`src/tableau/publishing/datasource.ts`)** —
+`listDatasourceConnections()`, `embedDatasourceConnectionCredential()` (PUT
+Update-Connection with `embedPassword='true'` + username → saved-credential match),
+`refreshDatasourceNow()` (POST `.../refresh` → returns `{ jobId }`).
+
+**Façade (`src/tableau/index.ts`)** — `TableauService` methods: `listConnectors`,
+`salesforceListTables`/`salesforceListedTables`, `salesforceOauthStart`/
+`completeSalesforceOauth`, `salesforceDescribeObject`, and
+`buildAndPublishSalesforceDatasource(session, input)`. The latter: describe → SOQL query
+(per-object cap) → generate `.tds` (single vs relationships vs join by `mode`) → build
+`.tdsx` → publish → **embed saved credential** on the connection(s) → **trigger extract
+refresh** (best-effort; see the caveat in [memory.md](./memory.md) about multi-object
+server-side rebuilds). Transient Salesforce state lives on `session.connectors.salesforce`
+and is cleared after publish; Salesforce credentials are never embedded.
+
 ## 6. Validation & guards (`src/validation/*`)
 
 - `fieldValidation.ts`: `validatePlanFields(plan, metadata)` extracts fields from
@@ -173,6 +235,13 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | POST | `/api/dashboard/approve` | approve by hash |
 | POST | `/api/dashboard/execute` | publish + verify |
 | GET | `/api/embed/info` | embed URL + optional JWT |
+| GET | `/api/connectors` | list source connectors (e.g. Salesforce) |
+| POST | `/api/connectors/salesforce/connect` | username/password login → list objects |
+| POST | `/api/connectors/salesforce/oauth/start` | begin browser OAuth (PKCE) |
+| GET | `/api/connectors/salesforce/oauth/callback` | OAuth redirect handler |
+| GET | `/api/connectors/salesforce/tables` | listed objects for the session |
+| POST | `/api/connectors/salesforce/describe` | describe an object's fields |
+| POST | `/api/connectors/salesforce/publish` | build + publish extract datasource |
 
 Client returns a sanitized error envelope `{ error: { code, message, hint?, details? } }`.
 
@@ -181,7 +250,11 @@ Client returns a sanitized error envelope `{ error: { code, message, hint?, deta
 `api.ts` stores only the session id (localStorage) and injects `x-session-id`; `App.tsx`
 renders the 4-step flow from the context snapshot; panels map 1:1 to the flow stages.
 `AuthoringPanel` loads Embedding API v3 and renders `<tableau-authoring-viz>` with the
-optional JWT.
+optional JWT. `SetupPanel` hosts the **Salesforce data-source builder** (`SalesforceBuild`)
+— a 3-step wizard (Connect → Model → Publish) with a Relationship|Join segmented control,
+a "combine multiple objects" toggle, and per-table relationship/join cards; it calls
+`api.salesforcePublish({ tables, relationships, mode, ... })`. Styles for it live in
+`app/styles.css` (`.sf*`, `.segmented`, `.switch`, `.tablecard`, `.joinrow`).
 
 ## 10. Errors (`src/utils/errors.ts`)
 

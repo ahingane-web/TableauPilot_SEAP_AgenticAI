@@ -39,8 +39,11 @@ is exactly the trigger this document always named for revisiting the no-Python s
 
 ## Boundaries preserved
 
-- The published extract embeds **no credentials** (static extract: viewable, not
-  refreshable on Cloud without re-publishing).
+- The extract `.hyper` is materialized locally from a fresh Salesforce query at publish
+  time. **Salesforce credentials are never embedded in the extract itself.** After
+  publish, the orchestration embeds the publisher's **saved Salesforce OAuth credential**
+  on the datasource connection and triggers an extract refresh so the datasource is
+  refreshable on Cloud (see [design.md](./design.md) §5b and [memory.md](./memory.md)).
 - XML is still generated deterministically in TypeScript, never by the LLM.
 - If a future feature needs richer local extract logic, extend the sidecar rather than
   spreading Python across the codebase.

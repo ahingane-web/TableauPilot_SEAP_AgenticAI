@@ -39,6 +39,22 @@ events only**. There is **no supported API** to, from code:
 
 Any product claiming to do these via the embed JS API is misrepresenting the platform.
 
+## Salesforce extract datasources — honest scope
+
+The Salesforce connector publishes an **extract-backed** datasource built from a fresh
+Salesforce query at publish time (all selected objects, with relationships or physical
+joins). Honest boundaries:
+
+- **Row caps.** Each object is capped (`HYPER_MAX_ROWS`); large objects are truncated, not
+  fully mirrored.
+- **Server-side refresh of multi-object datasources.** A Tableau-side refresh REBUILDS the
+  extract with Tableau's own engine and can collapse a relationship/join datasource to the
+  first table ("migrating data… only 1st table"). The bundled extract published by the app
+  always contains all tables. If this recurs, gate the post-publish refresh to
+  single-object builds (see [memory.md](./memory.md)).
+- Credentials are never embedded in the extract; refreshability relies on the saved
+  Salesforce credential on Tableau Cloud.
+
 ## The honest hand-off
 
 For anything in Category C, TableauPilot:

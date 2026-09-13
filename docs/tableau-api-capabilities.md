@@ -15,6 +15,11 @@ every capability to one of five buckets.
 | Open real Web Authoring | Embedding API v3 `TableauAuthoringViz` | ✅ Category B (human refines) |
 | Programmatically add shelves/marks/filters via the embed JS API | — | ❌ Category C (NOT supported) |
 | Human authoring in the real embed | User interacts with Tableau UI | ✅ Category B |
+| **Build a Salesforce extract datasource** | Local `.hyper` + `.tds` → REST publish `.tdsx` | ✅ Category A-gen |
+| Model Salesforce objects (relationships / physical joins) | Deterministic `.tds` generation | ✅ Category A-gen |
+| Embed saved credential on a datasource connection | REST Update-Connection (`embedPassword`) | ✅ Category A |
+| Refresh a published extract | REST `POST /datasources/{id}/refresh` | ✅ Category A |
+| Server-side extract creation from a live datasource | `createExtract` background job | ❌ unsupported on target site (see below) |
 
 ## Category A — Automate via REST
 
@@ -28,6 +33,21 @@ that references the **locked published datasource** and lays out worksheets + a
 dashboard. The `.twb` is published via REST, which creates a **real** workbook. See
 [authoring-limitations.md](./authoring-limitations.md) for the honest scope of this
 generation.
+
+## Category A-gen — Compile a Salesforce datasource into a real extract
+
+The Salesforce connector reads objects/fields (SOAP + REST), queries rows, and compiles a
+`.tds` (single, relationships object-graph, or physical join) plus a locally-materialized
+`.hyper` extract (Python Hyper sidecar) packaged as a `.tdsx`, then publishes it via REST.
+After publish it embeds the saved Salesforce credential and triggers an extract refresh.
+
+**Why build the `.hyper` locally?** Server-side extract creation from a live datasource
+was tried and failed on the target Cloud site — `createExtract` returns *"REST API does
+not support background job type :create_extracts"*, and constraining the query via `.tds`
+metadata hit `sf:MALFORMED_QUERY`/unsupported-job errors. Writing the `.hyper` locally
+(what Tableau Desktop does) is the only reliable path, and the Hyper API has no Node
+binding — hence the one Python sidecar (see
+[python-dependency-decision.md](./python-dependency-decision.md)).
 
 ## Category B — Real Web Authoring embed
 

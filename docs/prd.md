@@ -1,7 +1,7 @@
 # PRD — TableauPilot AI
 
 > Living document. Update this whenever product scope, requirements, or success
-> criteria change. Last updated: 2026-09-09.
+> criteria change. Last updated: 2026-09-13.
 
 ## 1. Summary
 
@@ -39,7 +39,8 @@ editor and never claims success it cannot verify.
   [authoring-limitations.md](./authoring-limitations.md)).
 - **No pixel-perfect fidelity claim.** Generated workbooks are best-effort scaffolds to
   be finished in the real embed.
-- **No Python.** TypeScript/Node.js only (see
+- **TypeScript/Node.js**, with one narrow exception: a Python Hyper API sidecar used
+  solely to materialize Salesforce `.hyper` extracts (see
   [python-dependency-decision.md](./python-dependency-decision.md)).
 - **No storing user Tableau secrets in `.env`** or in the browser/localStorage.
 - **No multi-tenant billing / user management** beyond the local vault (out of scope for
@@ -68,6 +69,13 @@ editor and never claims success it cannot verify.
 6. **Refine.** The published workbook opens in the **real** Web Authoring embed for
    Category C hand-finishing; saves captured via real `WorkbookPublished` events.
 
+**Alternate flow — Salesforce data source builder.** Instead of authoring a dashboard on
+an existing datasource, connect to **Salesforce** (username/password or browser OAuth),
+pick one or more objects, optionally **model** them (relationships or physical joins with
+join fields), then build and publish an **extract-backed** Tableau datasource. The
+extract is materialized locally and published; the saved Salesforce credential is embedded
+and an extract refresh is triggered so the datasource is refreshable on Cloud.
+
 ## 6. Functional requirements
 
 - **FR1 Vault.** Register/unlock with username + 6-digit PIN; AES-256-GCM at rest;
@@ -93,6 +101,14 @@ editor and never claims success it cannot verify.
   the real Web Authoring viz.
 - **FR12 Honesty.** Never claim success without REST verification; explicit Category C
   hand-off.
+- **FR13 Salesforce connector.** Connect to Salesforce (username/password + optional
+  security token, or browser OAuth PKCE); auto-resolve the org's REST API version; list
+  and describe objects; model one or more objects as **relationships** (object-graph +
+  cardinality) or a **physical join** (join type + field pair); materialize a local
+  `.hyper` extract (Python Hyper sidecar) + `.tds` → `.tdsx`; publish to the chosen
+  project; embed the saved Salesforce credential and trigger an extract refresh.
+  Salesforce credentials are used only to read schema/data and are never embedded in the
+  extract; multi-object field names are qualified (`Object.Field`) to avoid collisions.
 
 ## 7. Non-functional requirements
 
@@ -100,7 +116,8 @@ editor and never claims success it cannot verify.
   id to the browser; sanitized error envelope. See [security.md](./security.md).
 - **Reliability.** Structured-output planning works across Anthropic-compatible gateways
   (JSON prompt injection + fallback parsing).
-- **Portability.** TypeScript/Node ≥ 20.9; no Python; minimal dependencies.
+- **Portability.** TypeScript/Node ≥ 20.9; the only Python is the optional Hyper extract
+  sidecar (Salesforce connector); minimal dependencies.
 - **Observability.** Redacting logger + spans/events; Mastra Studio parity.
 - **Testability.** Unit + integration (Vitest) and non-destructive E2E (Playwright);
   `tsc`/lint/build must stay clean.

@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-09-09.
+> decisions change. Last updated: 2026-09-13.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -52,7 +52,9 @@ Mastra instance (src/mastra) ── `mastra dev` ──► Mastra Studio
 | **llm** | `llm/index.ts` | Provider-agnostic model resolution (Anthropic gateway or OpenRouter); custom fetch w/ key-helper + CA cert. |
 | **vault** | `vault/*` | Per-user PIN-encrypted credential store + in-memory sessions + `VaultService`. |
 | **schemas** | `schemas/*` | Zod schemas for the whole `DashboardPlan` contract. |
-| **tableau** | `tableau/*` | The ONLY place that talks HTTP to Tableau. Client + `auth`, `discovery`, `datasources` (Metadata API), `permissions`, `authoring` (`.twb`/`.twbx`), `publishing`, `verification`, and the `TableauService` façade (session-scoped). |
+| **tableau** | `tableau/*` | The ONLY place that talks HTTP to Tableau. Client + `auth`, `discovery`, `datasources` (Metadata API), `permissions`, `authoring` (`.twb`/`.twbx` + Salesforce `.tds`), `publishing` (workbooks, Salesforce `.tdsx` via `hyperPackager`, connection embed/refresh), `verification`, and the `TableauService` façade (session-scoped). |
+| **salesforce** | `salesforce/*` | Salesforce connectivity: SOAP `login` + REST `describe`/`query` + API-version auto-discovery (`client.ts`); browser OAuth PKCE (`oauth.ts`, `oauthStore.ts`). Session state is transient (in-memory). |
+| **hyper sidecar** | `scripts/hyper/build_tdsx.py` | Python Hyper API script (only Python in the repo) that writes a `.hyper` and zips it with the `.tds` into a `.tdsx`; invoked as a subprocess by `tableau/publishing/hyperPackager.ts`. |
 | **validation** | `validation/{fieldValidation,guards}.ts` | Field validation vs live metadata; deterministic guards (lock/project/approval). |
 | **processors** | `processors/*` | LLM secret-protection input processor + guard re-exports. |
 | **memory** | `memory/index.ts` | Mastra Memory (non-sensitive preferences only). |
@@ -91,6 +93,25 @@ Session state (`session.flow`) carries: `projectContext`, `datasourceLock`, `pla
 `approvedPlanHash`, `workbook`. All secrets stay in the session (in-memory) and the
 encrypted vault.
 
+## 3b. Data flow — Salesforce extract datasource (`buildAndPublishSalesforceDatasource`)
+
+```
+connect to Salesforce (username/password or OAuth) → auto-resolve REST API version
+  → list objects  →  user models objects in SetupPanel (mode + relationships/joins)
+  → describe each selected object (fields)
+  → SOQL query each object (per-object row cap)
+  → generate .tds  (single | relationships object-graph | physical join)
+  → materialize .hyper + package .tdsx   (Python Hyper sidecar)
+  → REST publish the .tdsx datasource to the chosen project
+  → embed the saved Salesforce credential on the connection(s)  (best-effort)
+  → trigger a server-side extract refresh                        (best-effort)
+  → return { datasource, extract:{ state, message } }
+```
+
+Salesforce creds + live session live only on `session.connectors.salesforce` (in-memory)
+and are cleared once publishing completes; the published datasource authenticates via the
+**saved Salesforce credential** on Tableau Cloud, never an embedded password.
+
 ## 4. Trust & secret boundaries
 
 - **Browser** ↔ **BFF**: only an opaque `x-session-id` and non-secret payloads. Errors
@@ -122,8 +143,14 @@ encrypted vault.
   as the standard packaged format.
 - **Two runtimes, one brain.** The API server and Mastra Studio import the same agent,
   tools, workflows, and service layer.
-- **No Python.** TypeScript/Node only. (See
+- **TypeScript/Node, with one narrow Python exception.** Everything is TS/Node except a
+  Python **Hyper API sidecar** (`scripts/hyper/build_tdsx.py`) used solely to materialize
+  Salesforce `.hyper` extracts (the Hyper API has no Node binding). (See
   [python-dependency-decision.md](./python-dependency-decision.md).)
+- **Salesforce extract datasources.** A second entry point connects to Salesforce, builds
+  a `.tds` (single / relationships / physical-join) + a locally-materialized `.hyper`
+  extract, publishes the `.tdsx`, then embeds the saved Salesforce credential and triggers
+  an extract refresh. (See [design.md](./design.md) §5b and [memory.md](./memory.md).)
 
 ## 6. Two runtimes, one brain
 

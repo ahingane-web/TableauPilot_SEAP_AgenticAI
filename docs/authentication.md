@@ -1,6 +1,7 @@
 # Authentication
 
-There are two distinct Tableau authentications, plus the local vault identity.
+There are two distinct Tableau authentications, plus the local vault identity — and,
+for the Salesforce connector, a separate Salesforce sign-in (§4).
 
 ## 1. Local vault identity (username + 6-digit PIN)
 
@@ -34,6 +35,21 @@ The real Web Authoring embed authenticates one of two ways:
 Set up a Connected App: Tableau Cloud → *Settings* → *Connected Apps* → *Direct Trust*.
 Grant the `tableau:views:embed` (and authoring) scope and register your app's domain.
 
+## 4. Salesforce connector sign-in (extract datasource builder)
+
+Only used by the Salesforce data-source builder; unrelated to Tableau auth above.
+
+- **Username / password (+ optional security token).** SOAP login (`src/salesforce/
+  client.ts` `login()`) returns a session used for REST `describe`/`query`. After login,
+  `resolveLatestApiVersion()` picks the org's highest available REST API version.
+- **Browser OAuth (PKCE) — optional.** With `SALESFORCE_OAUTH_CLIENT_ID` (+ secret)
+  configured, the user signs in via Salesforce; `src/salesforce/oauth.ts` runs the
+  PKCE authorize → token-exchange → userinfo flow (`/api/connectors/salesforce/oauth/*`).
+- Salesforce credentials/tokens are **transient and in-memory** (`session.connectors.
+  salesforce`), cleared after publish, and **never embedded** in the published extract.
+  The published datasource refreshes via the **saved Salesforce credential** on Tableau
+  Cloud (embedded on the connection by username match). See [security.md](./security.md).
+
 ## Token boundaries (summary)
 
 | Secret | Where it lives | Ever in browser? | Ever in LLM? |
@@ -43,3 +59,5 @@ Grant the `tableau:views:embed` (and authoring) scope and register your app's do
 | REST auth token | session (server) | never | never |
 | Connected App secret | vault + session (server) | never | never |
 | Minted embed JWT | server → browser (short-lived) | yes (by design) | never |
+| Salesforce creds / OAuth token | session only (transient, cleared after publish) | never | never |
+| Salesforce OAuth client secret | server env (if configured) | never | never |

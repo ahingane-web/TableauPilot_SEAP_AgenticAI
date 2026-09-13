@@ -1,7 +1,7 @@
 # Engineering & AI Rules — TableauPilot AI
 
 > **Binding** rules for anyone (human or AI) working in this repo. Update this whenever
-> an invariant, convention, or constraint changes. Last updated: 2026-09-09.
+> an invariant, convention, or constraint changes. Last updated: 2026-09-13.
 
 ## 1. Tech to use / avoid
 
@@ -14,7 +14,10 @@
 - **Vitest** (unit/integration) + **Playwright** (E2E, non-destructive).
 
 **Avoid**
-- **No Python** — ever (see [python-dependency-decision.md](./python-dependency-decision.md)).
+- **No Python except the one sanctioned Hyper sidecar** (`scripts/hyper/build_tdsx.py`,
+  used only to materialize Salesforce `.hyper` extracts — the Hyper API has no Node
+  binding). Do not spread Python anywhere else (see
+  [python-dependency-decision.md](./python-dependency-decision.md)).
 - **No fake authoring** — do not simulate shelf/mark/filter edits via the Embedding JS
   API; Tableau does not support it (see [authoring-limitations.md](./authoring-limitations.md)).
 - **No heavy/unnecessary dependencies.** Prefer stdlib + the minimal set above.
@@ -37,7 +40,12 @@
 7. **Guards live in code, not the model.** Deterministic guards are enforced in
    `src/validation`, never delegated to the LLM.
 8. **`TableauService`/`TableauClient` is the only HTTP path to Tableau.** No other module
-   calls Tableau directly.
+   calls Tableau directly. (Salesforce HTTP — SOAP login, REST describe/query, OAuth —
+   is isolated in `src/salesforce/*` and never talks to Tableau.)
+9. **Salesforce credentials are never embedded in a published extract.** They are held
+   transiently in-memory (`session.connectors.salesforce`) only to read schema/data, then
+   cleared. Published datasources authenticate via the saved Salesforce credential on
+   Tableau Cloud. Multi-object `.tds` field names are qualified `[Object.Field]`.
 
 ## 3. Security rules
 
@@ -73,6 +81,11 @@
   param (file type comes from the filename).
 - Treat `.twb`/`.twbx` generation as **best-effort scaffolding**; binding is finalized in
   the real Web Authoring embed. Never claim pixel-perfect fidelity.
+- **Salesforce extract datasources:** generate the `.tds` deterministically in TypeScript
+  (`tdsGenerator.ts`) — single, relationships (object-graph + cardinality), or physical
+  join (`<relation type='join'>`). Materialize the `.hyper` locally via the Python sidecar
+  and publish the `.tdsx`. After publish, embed the saved credential + trigger a refresh
+  (best-effort; never fail the publish). All XML is code-generated, never LLM-generated.
 
 ## 6. Coding conventions
 
@@ -85,13 +98,21 @@
 - Tests accompany non-trivial logic; **do not** add a test just to test a trivial edit.
 - **Keep `npm run typecheck`, `npm run lint`, `npm test`, `npm run build` green.**
 
-## 7. Documentation rule (this doc set)
+## 7. Documentation rule (ALL Markdown docs)
 
-The six governance docs are **living documents**. On any change that affects them, update
-the relevant file(s) in the same change:
+Every `.md` file in this repo is a **living document**. On **any** change to code,
+schemas, APIs, config, UI, or behavior, update **all** affected docs **in the same
+change** — this is part of the definition of done, enforced by the always-apply Cursor
+rule [`.cursor/rules/keep-docs-updated.mdc`](../.cursor/rules/keep-docs-updated.mdc).
+Verify facts against the code first, and bump each edited doc's `Last updated:` date.
+
 - **prd.md** — scope/goals/requirements/success criteria.
 - **architecture.md** — components, data flow, key decisions.
-- **design.md** — module interfaces, schemas, algorithms, snippets.
+- **design.md** — module interfaces, schemas, algorithms, API routes, snippets.
 - **rules.md** — invariants/conventions/security/error handling.
-- **phases.md** — build plan + "done" criteria.
-- **memory.md** — append a progress-log entry (decisions, fixes, current status).
+- **phases.md** — build plan + "done" criteria + test count.
+- **memory.md** — append a newest-first progress-log entry (decisions, fixes, status).
+- **README.md** — setup, env vars, run/usage, API surface.
+- **security.md**, **authentication.md**, **tableau-api-capabilities.md**,
+  **authoring-limitations.md**, **python-dependency-decision.md** — when their topic is
+  touched.

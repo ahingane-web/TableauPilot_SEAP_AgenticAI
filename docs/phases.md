@@ -1,7 +1,7 @@
 # Build Plan (Phases) — TableauPilot AI
 
 > Living document. Update the status + "done" criteria whenever a phase changes. Last
-> updated: 2026-09-09.
+> updated: 2026-09-13.
 
 Status legend: ✅ done · 🚧 in progress · ⬜ not started.
 
@@ -85,7 +85,20 @@ publish events captured.
 ## Phase 14 — Testing ✅
 **Produces:** `tests/unit/*`, `tests/integration/*`, `tests/e2e/*`, fixtures.
 **Done when:** unit + integration (Vitest) and non-destructive E2E (Playwright) pass;
-`tsc`/lint/build clean. Current: **57 unit/integration passing**.
+`tsc`/lint/build clean. Current: **190 unit/integration passing**.
+
+## Phase 15 — Salesforce connector: extract datasource builder ✅
+**Produces:** `src/salesforce/{client,oauth,oauthStore}.ts`,
+`src/tableau/authoring/tdsGenerator.ts` (Salesforce `.tds`),
+`src/tableau/publishing/{hyperPackager,datasource}.ts`, `scripts/hyper/build_tdsx.py`,
+`TableauService.buildAndPublishSalesforceDatasource`, `/api/connectors/salesforce/*`
+routes, and the `SalesforceBuild` wizard in `app/components/SetupPanel.tsx`.
+**Done when:** connect (username/password or OAuth) → model one/many objects
+(relationship or physical-join) → generate `.tds` + local `.hyper`/`.tdsx` (Python Hyper
+sidecar) → publish → embed saved Salesforce credential → trigger extract refresh. Single-
+and multi-object builds work; **190 tests passing**; `tsc`/lint clean.
+**Note:** multi-object server-side refresh can rebuild/collapse the extract — see the
+newest [memory.md](./memory.md) entry.
 
 ---
 
@@ -94,3 +107,5 @@ publish events captured.
 - 🚧 **Harden published-datasource binding / publishing** so a live end-to-end publish
   verifies successfully. Next candidate if `skipConnectionCheck` isn't enough: download
   the real published-datasource connection XML and embed it. See [memory.md](./memory.md).
+- 🔎 **Salesforce multi-object refresh behavior** — confirm whether a server-side refresh
+  preserves all tables for relationship/join datasources, or gate refresh to single-object.

@@ -21,7 +21,10 @@ vault** and never reach the browser or the LLM.
 - **Authoring limits (Category C):** [docs/authoring-limitations.md](./docs/authoring-limitations.md)
 - **Authentication:** [docs/authentication.md](./docs/authentication.md)
 - **Security & the PIN vault:** [docs/security.md](./docs/security.md)
-- **Why no Python:** [docs/python-dependency-decision.md](./docs/python-dependency-decision.md)
+- **Python usage (Hyper extract sidecar):** [docs/python-dependency-decision.md](./docs/python-dependency-decision.md)
+
+It can also connect to **Salesforce** and publish an extract-backed Tableau datasource
+(one or more objects, optionally modeled as relationships or physical joins).
 
 ## Requirements
 
@@ -37,6 +40,10 @@ npm install
 cp .env.example .env
 # edit .env — set VAULT_PEPPER (long random), LLM provider + key, Tableau API version
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # for VAULT_PEPPER
+
+# (optional) for the Salesforce extract-datasource builder — creates .venv-hyper with the
+# Tableau Hyper API (Python). Only needed if you use the Salesforce connector.
+npm run setup:hyper
 ```
 
 Key env vars (full list + comments in [.env.example](./.env.example)):
@@ -51,6 +58,8 @@ Key env vars (full list + comments in [.env.example](./.env.example)):
 | `VAULT_PEPPER` | **required** server-only pepper for the PIN KDF |
 | `DATA_PATH` | encrypted vault + storage dir (git-ignored) |
 | `API_PORT` / `WEB_PORT` / `CORS_ORIGINS` | app wiring |
+| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce connector only) |
+| `SALESFORCE_OAUTH_CLIENT_ID` / `SALESFORCE_OAUTH_CLIENT_SECRET` / `SALESFORCE_OAUTH_REDIRECT_URI` | Salesforce browser-OAuth (optional; username/password works without them) |
 
 Per-user **Tableau credentials are never in `.env`** — you enter them in the app and
 they're stored in the encrypted vault.
@@ -90,6 +99,12 @@ npm start            # NODE_ENV=production; serves API and the built SPA
    right. Finish anything in Category C by hand; saves are captured via the real
    `WorkbookPublished` events.
 
+**Or build a Salesforce data source** — in the setup panel, connect to Salesforce
+(username/password or OAuth), pick one or more objects, optionally model them
+(Relationship or Join) with join fields, then publish. The extract is materialized locally
+(Hyper sidecar), published to your chosen project, and the saved Salesforce credential is
+embedded + an extract refresh is triggered.
+
 ## Mastra Studio
 
 `npm run dev:studio` runs `mastra dev`, exposing the same agent, tools, workflows, and
@@ -111,6 +126,8 @@ stay server-side.
 - `POST /api/dashboard/plan`, `GET /api/dashboard/plan`, `POST /api/dashboard/approve`,
   `POST /api/dashboard/execute`
 - `GET /api/embed/info`
+- `GET /api/connectors`, `POST /api/connectors/salesforce/{connect,describe,publish}`,
+  `POST /api/connectors/salesforce/oauth/start`, `GET /api/connectors/salesforce/{tables,oauth/callback}`
 
 ## Testing
 

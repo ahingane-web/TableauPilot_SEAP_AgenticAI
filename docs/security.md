@@ -48,6 +48,24 @@
 - **Frontend:** `app/api.ts` stores only the session id in `localStorage`; the client
   type surface (`app/types.ts`) contains no secret fields.
 
+## Salesforce connector
+
+- **Transient only.** Salesforce credentials (username/password + optional token, or the
+  OAuth access token) and the live Salesforce session are held **in-memory** on
+  `session.connectors.salesforce`, used only to describe objects / query rows / build the
+  extract, and **cleared once publishing completes**. They are never persisted to the
+  vault and never sent to the browser or the LLM.
+- **Never embedded in the extract.** The published `.hyper`/`.tds` contains **no**
+  Salesforce credentials. Refreshability on Cloud comes from the publisher's **saved
+  Salesforce OAuth credential** (embedded on the datasource connection by username match),
+  which is a Tableau-Cloud-side stored credential — not a secret this app holds.
+- **OAuth (PKCE).** The interactive browser flow uses PKCE; the pending `state`/verifier
+  is stored transiently and swept (`oauthStore.ts`). The client secret (if configured)
+  stays server-side.
+- **Hyper sidecar hygiene.** `hyperPackager.ts` passes the sidecar only **temp-file
+  paths** on argv — never row data or secrets — so nothing sensitive appears in the
+  process table; the temp directory is always removed (even on failure).
+
 ## Operational guidance
 
 - Set a strong, unique `VAULT_PEPPER`; rotating it invalidates all vaults (by design).
