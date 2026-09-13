@@ -146,7 +146,38 @@ export async function login(creds: SalesforceCredentials): Promise<SalesforceSes
     instanceUrl = loginOrigin;
   }
   log.info('Salesforce login succeeded', { instanceHost: new URL(instanceUrl).host });
-  return { instanceUrl, accessToken: sessionId, apiVersion: SALESFORCE_API_VERSION };
+  // Salesforce rolls out API versions gradually, so a hardcoded version can 404 on some
+  // orgs (e.g. new Developer Edition orgs). Resolve the newest version the org actually
+  // serves from the unversioned /services/data/ resource; fall back to the SOAP version.
+  const apiVersion = await resolveLatestApiVersion(instanceUrl, sessionId, SALESFORCE_API_VERSION);
+  return { instanceUrl, accessToken: sessionId, apiVersion };
+}
+
+/**
+ * Discover the newest REST API version an org supports by querying the unversioned
+ * `/services/data/` resource (which never 404s on version). Best-effort: any failure
+ * returns {@link fallback} so login still succeeds.
+ */
+export async function resolveLatestApiVersion(instanceUrl: string, accessToken: string, fallback: string): Promise<string> {
+  try {
+    const res = await fetch(`${instanceUrl}/services/data/`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    });
+    if (!res.ok) return fallback;
+    const versions = (await res.json()) as Array<{ version?: string }>;
+    const numbers = (Array.isArray(versions) ? versions : [])
+      .map((v) => Number.parseFloat(String(v?.version ?? '')))
+      .filter((n) => Number.isFinite(n));
+    if (numbers.length === 0) return fallback;
+    const latest = Math.max(...numbers).toFixed(1);
+    if (latest !== fallback) {
+      log.info('Resolved Salesforce REST API version', { apiVersion: latest });
+    }
+    return latest;
+  } catch {
+    return fallback;
+  }
 }
 
 async function restGet<T>(session: SalesforceSession, path: string): Promise<T> {

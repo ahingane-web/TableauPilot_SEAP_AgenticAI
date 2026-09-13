@@ -119,7 +119,9 @@ describe('fetchUserInfo + sessionFromToken', () => {
     const token = { accessToken: 'ACCESS', instanceUrl: 'https://mydomain.my.salesforce.com' };
     const info = await fetchUserInfo(token);
     expect(info.username).toBe('user@example.com');
-    const session = sessionFromToken(token);
+    // The mocked fetch returns a non-array for /services/data/, so version resolution
+    // falls back to the default SOAP API version.
+    const session = await sessionFromToken(token);
     expect(session).toEqual({ instanceUrl: 'https://mydomain.my.salesforce.com', accessToken: 'ACCESS', apiVersion: '59.0' });
   });
 });

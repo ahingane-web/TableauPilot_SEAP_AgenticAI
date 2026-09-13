@@ -130,3 +130,71 @@ export async function publishDatasource(
     projectName: ds.project?.name,
   };
 }
+
+/** A connection belonging to a published datasource (from List Data Source Connections). */
+export interface DatasourceConnection {
+  id: string;
+  type?: string;
+  serverAddress?: string;
+  userName?: string;
+}
+
+/**
+ * List the connections of a published datasource. A Salesforce extract datasource has one
+ * live Salesforce connection (plus the internal hyper/extract connection); callers use the
+ * returned `id`(s) to embed credentials via {@link embedDatasourceConnectionCredential}.
+ */
+export async function listDatasourceConnections(
+  client: TableauClient,
+  siteId: string,
+  datasourceId: string,
+): Promise<DatasourceConnection[]> {
+  const body = await client.get<any>(`/sites/${siteId}/datasources/${datasourceId}/connections`);
+  const raw = body?.connections?.connection;
+  const arr = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  return arr.map((c: any) => ({
+    id: String(c?.id ?? ''),
+    type: c?.type,
+    serverAddress: c?.serverAddress,
+    userName: c?.userName,
+  })).filter((c: DatasourceConnection) => c.id);
+}
+
+/**
+ * Update a published datasource connection to EMBED its credential ("Update Data Source
+ * Connection"). For an OAuth (Salesforce) connection this embeds the requesting user's SAVED
+ * OAuth credential (matched by `userName`) so the datasource can refresh unattended. For
+ * OAuth there is no raw password to send — only `embedPassword='true'` (+ the account
+ * `userName`) is used; Tableau resolves the saved credential server-side.
+ */
+export async function embedDatasourceConnectionCredential(
+  client: TableauClient,
+  siteId: string,
+  datasourceId: string,
+  connectionId: string,
+  opts: { userName?: string } = {},
+): Promise<void> {
+  const connection: Record<string, unknown> = { embedPassword: 'true' };
+  if (opts.userName) connection.userName = opts.userName;
+  await client.putJson(`/sites/${siteId}/datasources/${datasourceId}/connections/${connectionId}`, { connection });
+  log.info('Embedded saved credential on datasource connection', { datasourceId, connectionId });
+}
+
+/**
+ * Trigger a full extract refresh for a published datasource ("Update Data Source Now").
+ * Re-queries the live source (via the datasource's embedded/saved credential) and rebuilds
+ * the server-side extract, so the datasource reflects fresh data right after publishing.
+ * Returns the async job id Tableau created. Requires the datasource to have connectable
+ * credentials (embedded on publish) or the job will fail server-side.
+ */
+export async function refreshDatasourceNow(
+  client: TableauClient,
+  siteId: string,
+  datasourceId: string,
+): Promise<{ jobId?: string }> {
+  // The endpoint accepts an empty request body; Tableau returns the created job.
+  const body = await client.postJson<any>(`/sites/${siteId}/datasources/${datasourceId}/refresh`, {});
+  const jobId: string | undefined = body?.job?.id;
+  log.info('Started datasource extract refresh', { datasourceId, jobId });
+  return { jobId };
+}

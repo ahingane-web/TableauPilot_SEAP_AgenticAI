@@ -226,6 +226,383 @@ export function generateSalesforceTds(input: SalesforceTdsInput): string {
   );
 }
 
+/** Relationship cardinality; maps onto Tableau end-point `unique-key` flags. */
+export type SalesforceCardinality = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+
+/** SQL join type for the physical-join model; emitted verbatim as the `join='...'` attribute. */
+export type SalesforceJoinType = 'inner' | 'left' | 'right' | 'full';
+
+/** One object participating in a multi-table (relationships) datasource. */
+export interface SalesforceTableSpec {
+  /** Salesforce object (SObject) API name, e.g. `Account`. */
+  object: string;
+  /** Described fields (compound/blob already excluded upstream). */
+  fields: SalesforceColumnSpec[];
+}
+
+/** One data-modeling edge: a matching field pair between two objects + cardinality. */
+export interface SalesforceRelationshipSpec {
+  leftObject: string;
+  leftField: string;
+  rightObject: string;
+  rightField: string;
+  /** Relationships-model cardinality; defaults to `many-to-many` (neither side unique). */
+  cardinality?: SalesforceCardinality;
+  /** Physical-join model join type; defaults to `left`. Ignored by the relationships model. */
+  joinType?: SalesforceJoinType;
+}
+
+export interface SalesforceRelationshipsTdsInput {
+  /** Display/caption name of the datasource. */
+  datasourceName: string;
+  /** Resolved Salesforce instance host for the connection `server` attribute. */
+  serverHost: string;
+  /** Salesforce username used for the connection (no secret). */
+  username: string;
+  /** Credential model; defaults to {@link DEFAULT_SALESFORCE_AUTH_MODE}. */
+  authMode?: SalesforceAuthMode;
+  /** For OAuth, emit `server-oauth='server-custom'` (defaults true). */
+  serverOauthCustom?: boolean;
+  /** Salesforce connector API version; defaults to {@link DEFAULT_SALESFORCE_API_VERSION}. */
+  salesforceApiVersion?: string;
+  /** The objects to join (>= 2). */
+  tables: SalesforceTableSpec[];
+  /** The relationships connecting the objects into one graph. */
+  relationships: SalesforceRelationshipSpec[];
+  /** Extract packaging: path of the `.hyper` inside the `.tdsx`. */
+  extract: { hyperDbname: string };
+}
+
+/** Stable, unique per-column alias used as the `<cols>` key / logical `<column>` name. */
+function aliasFor(object: string, field: string): string {
+  return `${object}.${field}`;
+}
+
+/** Fields with a valid Salesforce API name (defensive; matches single-object generator). */
+function validColumns(fields: SalesforceColumnSpec[]): SalesforceColumnSpec[] {
+  return (fields ?? []).filter((f) => /^[A-Za-z][A-Za-z0-9_]*$/.test(String(f.name ?? '')));
+}
+
+/**
+ * Generate a `.tds` for a multi-object, EXTRACT-backed Salesforce datasource using
+ * Tableau's relationships (object-graph) model — modeled 1:1 on the reference
+ * `reference/sample_datasource_DataModelling.tds`. Each object is its own physical
+ * `<relation type='table'>` (inside a `<relation type='collection'>`) and its own
+ * `Extract."<Object>"` table; the joins live only in the trailing `<object-graph>`.
+ */
+export function generateSalesforceRelationshipsTds(input: SalesforceRelationshipsTdsInput): string {
+  const tables = input.tables ?? [];
+  if (tables.length < 2) {
+    throw new Error('generateSalesforceRelationshipsTds requires at least two tables.');
+  }
+  for (const t of tables) {
+    const object = String(t.object ?? '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object)) {
+      throw new Error(`Invalid Salesforce object name for datasource generation: ${t.object}`);
+    }
+  }
+  const authMode = input.authMode ?? DEFAULT_SALESFORCE_AUTH_MODE;
+  const auth = authAttrForMode(authMode);
+  const apiVersion = input.salesforceApiVersion ?? DEFAULT_SALESFORCE_API_VERSION;
+  const formattedName = escapeXml(input.datasourceName || tables[0]?.object || '');
+  const serverHost = escapeXml(input.serverHost);
+  const username = escapeXml(input.username);
+  const serverOauthAttr =
+    authMode === 'oauth' && input.serverOauthCustom !== false ? `server-oauth='server-custom' ` : '';
+
+  return (
+    `<?xml version='1.0' encoding='utf-8' ?>\n` +
+    `<datasource formatted-name='${formattedName}' inline='true' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>\n` +
+    `  <connection class='federated'>\n` +
+    `    <named-connections>\n` +
+    `      <named-connection caption='${serverHost}' name='${CONNECTION_NAME}'>\n` +
+    `        <connection authentication='${auth}' class='salesforce' ` +
+    `compressed-responses='yes' compressed-responses-bulk='yes' compressed-responses-rest='yes' compressed-responses-soap='yes' ` +
+    `maxfieldlength='4096' pagesize='200' salesforce-api-version='${escapeXml(apiVersion)}' ` +
+    `server='${serverHost}' ${serverOauthAttr}sf-total-requestor-buffer-size-in-mb='32' username='${username}' />\n` +
+    `      </named-connection>\n` +
+    `    </named-connections>\n` +
+    relationCollectionXml(tables, CONNECTION_NAME) +
+    colsMapMultiXml(tables) +
+    metadataRecordsMultiXml(tables, '    ') +
+    `  </connection>\n` +
+    columnsMultiXml(tables) +
+    extractElementMultiXml(tables, input.extract.hyperDbname) +
+    `  <aliases enabled='yes' />\n` +
+    objectGraphXml(tables, input.relationships ?? [], CONNECTION_NAME) +
+    `</datasource>\n`
+  );
+}
+
+/**
+ * Generate a `.tds` for a multi-object, EXTRACT-backed Salesforce datasource using a
+ * PHYSICAL join (Tableau's classic join canvas) rather than the relationships model.
+ * The objects are flattened via a left-deep tree of `<relation type='join' join='...'>`
+ * in BOTH the federated (live) connection and the `<extract>` `class='hyper'` connection
+ * (over the same N `Extract."<Object>"` tables the relationships model uses). There is NO
+ * trailing `<object-graph>` — the join lives entirely in the physical relation.
+ */
+export function generateSalesforcePhysicalJoinTds(input: SalesforceRelationshipsTdsInput): string {
+  const tables = input.tables ?? [];
+  if (tables.length < 2) {
+    throw new Error('generateSalesforcePhysicalJoinTds requires at least two tables.');
+  }
+  for (const t of tables) {
+    const object = String(t.object ?? '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object)) {
+      throw new Error(`Invalid Salesforce object name for datasource generation: ${t.object}`);
+    }
+  }
+  const relationships = input.relationships ?? [];
+  const authMode = input.authMode ?? DEFAULT_SALESFORCE_AUTH_MODE;
+  const auth = authAttrForMode(authMode);
+  const apiVersion = input.salesforceApiVersion ?? DEFAULT_SALESFORCE_API_VERSION;
+  const formattedName = escapeXml(input.datasourceName || tables[0]?.object || '');
+  const serverHost = escapeXml(input.serverHost);
+  const username = escapeXml(input.username);
+  const serverOauthAttr =
+    authMode === 'oauth' && input.serverOauthCustom !== false ? `server-oauth='server-custom' ` : '';
+
+  return (
+    `<?xml version='1.0' encoding='utf-8' ?>\n` +
+    `<datasource formatted-name='${formattedName}' inline='true' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>\n` +
+    `  <connection class='federated'>\n` +
+    `    <named-connections>\n` +
+    `      <named-connection caption='${serverHost}' name='${CONNECTION_NAME}'>\n` +
+    `        <connection authentication='${auth}' class='salesforce' ` +
+    `compressed-responses='yes' compressed-responses-bulk='yes' compressed-responses-rest='yes' compressed-responses-soap='yes' ` +
+    `maxfieldlength='4096' pagesize='200' salesforce-api-version='${escapeXml(apiVersion)}' ` +
+    `server='${serverHost}' ${serverOauthAttr}sf-total-requestor-buffer-size-in-mb='32' username='${username}' />\n` +
+    `      </named-connection>\n` +
+    `    </named-connections>\n` +
+    joinRelationTreeXml(tables, relationships, { connectionName: CONNECTION_NAME }) +
+    colsMapMultiXml(tables) +
+    metadataRecordsMultiXml(tables, '    ') +
+    `  </connection>\n` +
+    columnsMultiXml(tables) +
+    extractElementWithRelationXml(
+      tables,
+      input.extract.hyperDbname,
+      joinRelationTreeXml(tables, relationships, {}, '      '),
+    ) +
+    `  <aliases enabled='yes' />\n` +
+    `</datasource>\n`
+  );
+}
+
+/**
+ * A left-deep tree of `<relation type='join'>` flattening the objects in `tables` order.
+ * Each table after the first is joined to the accumulated left side via the relationship
+ * whose `rightObject` is that table. When `opts.connectionName` is set the leaves reference
+ * the LIVE tables (`connection=... table='[Object]'`); otherwise they reference the extract
+ * tables (`table='[Extract].[Object]'`). The join clause is identical in both cases.
+ */
+function joinRelationTreeXml(
+  tables: SalesforceTableSpec[],
+  relationships: SalesforceRelationshipSpec[],
+  opts: { connectionName?: string },
+  indent = '    ',
+): string {
+  const relByRight = new Map(relationships.map((r) => [r.rightObject, r]));
+  const leafXml = (object: string, ind: string): string => {
+    const n = escapeXml(object);
+    return opts.connectionName
+      ? `${ind}<relation connection='${escapeXml(opts.connectionName)}' name='${n}' table='[${n}]' type='table' />\n`
+      : `${ind}<relation name='${n}' table='[Extract].[${n}]' type='table' />\n`;
+  };
+  const buildNode = (k: number, ind: string): string => {
+    const object = String(tables[k]?.object ?? '');
+    if (k === 0) return leafXml(object, ind);
+    const rel = relByRight.get(object);
+    const joinType: SalesforceJoinType = rel?.joinType ?? 'left';
+    const inner = ind + '  ';
+    return (
+      `${ind}<relation join='${joinType}' type='join'>\n` +
+      buildNode(k - 1, inner) +
+      leafXml(object, inner) +
+      joinClauseXml(rel, inner) +
+      `${ind}</relation>\n`
+    );
+  };
+  return buildNode(tables.length - 1, indent);
+}
+
+/** `<clause type='join'>` with an `=` expression over the two PHYSICAL `[Object].[Field]` columns. */
+function joinClauseXml(rel: SalesforceRelationshipSpec | undefined, indent: string): string {
+  const inner = indent + '  ';
+  const innerer = inner + '  ';
+  const left = rel ? `[${escapeXml(rel.leftObject)}].[${escapeXml(rel.leftField)}]` : '';
+  const right = rel ? `[${escapeXml(rel.rightObject)}].[${escapeXml(rel.rightField)}]` : '';
+  return (
+    `${indent}<clause type='join'>\n` +
+    `${inner}<expression op='='>\n` +
+    `${innerer}<expression op='${left}' />\n` +
+    `${innerer}<expression op='${right}' />\n` +
+    `${inner}</expression>\n` +
+    `${indent}</clause>\n`
+  );
+}
+
+/** Physical `<relation type='collection'>` of one table relation per object. */
+function relationCollectionXml(tables: SalesforceTableSpec[], connectionName: string, indent = '    '): string {
+  const inner = indent + '  ';
+  const rels = tables
+    .map((t) => {
+      const n = escapeXml(t.object);
+      return `${inner}<relation connection='${connectionName}' name='${n}' table='[${n}]' type='table' />\n`;
+    })
+    .join('');
+  return `${indent}<relation type='collection'>\n` + rels + `${indent}</relation>\n`;
+}
+
+/** Merged `<cols>` alias map (`[Object.Field]` -> `[Object].[Field]`) across all objects. */
+function colsMapMultiXml(tables: SalesforceTableSpec[], indent = '    '): string {
+  const inner = indent + '  ';
+  const maps: string[] = [];
+  for (const t of tables) {
+    const objName = escapeXml(t.object);
+    for (const f of validColumns(t.fields)) {
+      const alias = escapeXml(aliasFor(t.object, f.name));
+      maps.push(`${inner}<map key='[${alias}]' value='[${objName}].[${escapeXml(f.name)}]' />\n`);
+    }
+  }
+  if (maps.length === 0) return '';
+  return `${indent}<cols>\n` + maps.join('') + `${indent}</cols>\n`;
+}
+
+/** Merged `<metadata-records>` (one record per column, across all objects). */
+function metadataRecordsMultiXml(tables: SalesforceTableSpec[], indent = '    '): string {
+  const inner = indent + '  ';
+  const blocks = tables
+    .map((t) => {
+      const objectId = salesforceObjectId(t.object);
+      return validColumns(t.fields)
+        // Unique `Object.Field` local-name so duplicate API names (e.g. `Id`) across objects
+        // don't collide -> avoids Tableau's "Duplicate field name" load/refresh error.
+        .map((f) => metadataRecord(f, t.object, objectId, inner, aliasFor(t.object, f.name)))
+        .join('');
+    })
+    .join('');
+  if (!blocks) return '';
+  return `${indent}<metadata-records>\n` + blocks + `${indent}</metadata-records>\n`;
+}
+
+/** Datasource-level `<column>` elements (one per column) named by their unique alias. */
+function columnsMultiXml(tables: SalesforceTableSpec[]): string {
+  let out = '';
+  for (const t of tables) {
+    for (const f of validColumns(t.fields)) {
+      out += `  ${columnElementAliased(f, aliasFor(t.object, f.name))}\n`;
+    }
+  }
+  return out;
+}
+
+/** `<extract>` with a `class='hyper'` connection over N `Extract."<Object>"` tables (relationships model). */
+function extractElementMultiXml(tables: SalesforceTableSpec[], hyperDbname: string): string {
+  const relations = tables
+    .map((t) => {
+      const n = escapeXml(t.object);
+      return `        <relation name='${n}' table='[Extract].[${n}]' type='table' />\n`;
+    })
+    .join('');
+  const collection = `      <relation type='collection'>\n` + relations + `      </relation>\n`;
+  return extractElementWithRelationXml(tables, hyperDbname, collection);
+}
+
+/**
+ * `<extract>` with a `class='hyper'` connection whose relation block is supplied by the
+ * caller (a `<relation type='collection'>` for the relationships model, or a
+ * `<relation type='join'>` tree for the physical-join model). `relationXml` must already be
+ * indented to sit inside the `<connection>` (6 spaces). The merged `<cols>`/`<metadata-records>`
+ * use the same qualified `[Object.Field]` aliases as the physical connection.
+ */
+function extractElementWithRelationXml(
+  tables: SalesforceTableSpec[],
+  hyperDbname: string,
+  relationXml: string,
+): string {
+  return (
+    `  <extract count='-1' enabled='true' object-id='' units='records' user-specific='false'>\n` +
+    `    <connection authentication='auth-none' class='hyper' dbname='${escapeXml(hyperDbname)}' ` +
+    `default-settings='yes' schema='Extract' tablename='Extract'>\n` +
+    relationXml +
+    colsMapMultiXml(tables, '      ') +
+    metadataRecordsMultiXml(tables, '      ') +
+    `    </connection>\n` +
+    `  </extract>\n`
+  );
+}
+
+/** The trailing `<object-graph>` (logical model): objects + relationships with cardinality. */
+function objectGraphXml(
+  tables: SalesforceTableSpec[],
+  relationships: SalesforceRelationshipSpec[],
+  connectionName: string,
+): string {
+  const bareId = (object: string): string => salesforceObjectId(object).replace(/^\[|\]$/g, '');
+
+  const objectsXml = tables
+    .map((t) => {
+      const n = escapeXml(t.object);
+      const id = escapeXml(bareId(t.object));
+      return (
+        `      <object caption='${n}' id='${id}'>\n` +
+        `        <properties context=''>\n` +
+        `          <relation connection='${connectionName}' name='${n}' table='[${n}]' type='table' />\n` +
+        `        </properties>\n` +
+        `        <properties context='extract'>\n` +
+        `          <relation name='${n}' table='[Extract].[${n}]' type='table' />\n` +
+        `        </properties>\n` +
+        `      </object>\n`
+      );
+    })
+    .join('');
+
+  const relsXml = relationships
+    .map((r) => {
+      const card: SalesforceCardinality = r.cardinality ?? 'many-to-many';
+      const leftUnique = card === 'one-to-many' || card === 'one-to-one';
+      const rightUnique = card === 'many-to-one' || card === 'one-to-one';
+      const leftAlias = escapeXml(aliasFor(r.leftObject, r.leftField));
+      const rightAlias = escapeXml(aliasFor(r.rightObject, r.rightField));
+      const leftId = escapeXml(bareId(r.leftObject));
+      const rightId = escapeXml(bareId(r.rightObject));
+      const head = (u: boolean) => (u ? `is-db-set-unique-key='true' ` : '');
+      const tail = (u: boolean) => (u ? ` unique-key='true'` : '');
+      return (
+        `      <relationship>\n` +
+        `        <expression op='='>\n` +
+        `          <expression op='[${leftAlias}]' />\n` +
+        `          <expression op='[${rightAlias}]' />\n` +
+        `        </expression>\n` +
+        `        <first-end-point ${head(leftUnique)}object-id='${leftId}'${tail(leftUnique)} />\n` +
+        `        <second-end-point ${head(rightUnique)}object-id='${rightId}'${tail(rightUnique)} />\n` +
+        `      </relationship>\n`
+      );
+    })
+    .join('');
+
+  return (
+    `  <object-graph>\n` +
+    `    <objects>\n` +
+    objectsXml +
+    `    </objects>\n` +
+    `    <relationships>\n` +
+    relsXml +
+    `    </relationships>\n` +
+    `  </object-graph>\n`
+  );
+}
+
+/** A datasource-level `<column>` named by a unique alias (multi-object variant). */
+function columnElementAliased(field: SalesforceColumnSpec, alias: string): string {
+  const twb = salesforceToTwbDataType(field.salesforceType);
+  const role = twb === 'integer' || twb === 'real' ? 'measure' : 'dimension';
+  const type = role === 'measure' ? 'quantitative' : twb === 'date' || twb === 'datetime' ? 'ordinal' : 'nominal';
+  return `<column datatype='${twb}' name='[${escapeXml(alias)}]' role='${role}' type='${type}' />`;
+}
+
 /** `<cols>` alias map (`[Field]` -> `[Object].[Field]`) for the given fields, or '' if none. */
 function colsMapXml(fields: SalesforceColumnSpec[], objName: string, indent = '    '): string {
   if (fields.length === 0) return '';
@@ -316,17 +693,28 @@ export function salesforceObjectId(object: string): string {
 }
 
 /** A single `<metadata-record class='column'>` for a described field. */
-function metadataRecord(field: SalesforceColumnSpec, object: string, objectId: string, indent = '      '): string {
+function metadataRecord(
+  field: SalesforceColumnSpec,
+  object: string,
+  objectId: string,
+  indent = '      ',
+  localName?: string,
+): string {
   const twb = salesforceToTwbDataType(field.salesforceType);
   const name = escapeXml(field.name);
   const remoteType = localTypeToRemoteCode(twb);
   const containsNull = field.nillable === false ? 'false' : 'true';
   const inner = indent + '  ';
+  // `local-name` is the field's GLOBAL identity/caption. In a multi-object datasource the
+  // same API name (e.g. `Id`) exists on several objects, so callers pass a unique alias
+  // (`Object.Field`) to avoid Tableau's "Duplicate field name" load error. `remote-name`/
+  // `remote-alias` always keep the raw Salesforce API name (scoped by parent-name).
+  const local = escapeXml(localName ?? field.name);
   return (
     `${indent}<metadata-record class='column'>\n` +
     `${inner}<remote-name>${name}</remote-name>\n` +
     `${inner}<remote-type>${remoteType}</remote-type>\n` +
-    `${inner}<local-name>[${name}]</local-name>\n` +
+    `${inner}<local-name>[${local}]</local-name>\n` +
     `${inner}<parent-name>[${escapeXml(object)}]</parent-name>\n` +
     `${inner}<remote-alias>${name}</remote-alias>\n` +
     `${inner}<local-type>${twb}</local-type>\n` +

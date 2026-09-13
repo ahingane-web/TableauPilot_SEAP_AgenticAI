@@ -138,6 +138,16 @@ export class TableauClient {
     return (await this.parse(res)) as T;
   }
 
+  /** PUT JSON — used for updates like embedding connection credentials. */
+  async putJson<T = unknown>(path: string, body: unknown): Promise<T> {
+    const res = await this.rawFetch(`${this.base()}${path}`, {
+      method: 'PUT',
+      headers: this.authHeaders({ Accept: 'application/json', 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    return (await this.parse(res)) as T;
+  }
+
   /** POST to the Metadata API (GraphQL) at /api/metadata/graphql. */
   async metadataGraphql<T = unknown>(query: string, variables?: Record<string, unknown>): Promise<T> {
     const res = await this.rawFetch(`${this.serverUrl}/api/metadata/graphql`, {

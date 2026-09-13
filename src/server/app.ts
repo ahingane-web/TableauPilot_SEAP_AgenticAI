@@ -24,7 +24,7 @@ import {
   updateWorksheetFormatting,
 } from '../planning/index.js';
 import { hashPlan } from '../validation/guards.js';
-import { HexColorSchema, TextFormatSchema, SalesforceCredentialsSchema, FitModeSchema } from '../schemas/common.js';
+import { HexColorSchema, TextFormatSchema, SalesforceCredentialsSchema, SalesforceBuildSchema, FitModeSchema } from '../schemas/common.js';
 import { ReferenceLineSpecSchema, ColorMapSpecSchema, GrandTotalsSchema } from '../schemas/worksheetSpec.js';
 import { runPublishAndVerify } from '../execution/index.js';
 import { TableauService } from '../tableau/index.js';
@@ -333,38 +333,63 @@ export function createApp(): Hono {
     return c.json({ tables });
   });
 
+  // Describe a Salesforce object's fields (name/label/type) for the relationship
+  // builder's join-field dropdowns. Uses the transient connector session.
+  app.post('/api/connectors/salesforce/describe', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ object?: string }>();
+    const object = String(body.object ?? '').trim();
+    if (!object) throw new AppError('VALIDATION', 'Provide a Salesforce object/table to describe (e.g. Account).');
+    const fields = await TableauService.salesforceDescribeObject(session, object);
+    return c.json({ fields });
+  });
+
   app.post('/api/connectors/salesforce/publish', async (c) => {
     const session = requireSession(c);
-    const body = await c.req.json<{
+    const raw = await c.req.json<{
       credentials?: unknown;
       object?: string;
+      tables?: unknown;
+      relationships?: unknown;
+      mode?: unknown;
       projectId?: string;
       datasourceName?: string;
       overwrite?: boolean;
       serverOauthCustom?: boolean;
     }>();
+    // Back-compat: a legacy `{ object }` body maps to a single-table build.
+    const tables = Array.isArray(raw.tables)
+      ? raw.tables
+      : raw.object
+        ? [raw.object]
+        : [];
     // Salesforce credentials are used ONLY to read the object schema (describe); they are
     // never embedded in the published datasource (publishing uses the saved credential).
-    const creds = SalesforceCredentialsSchema.safeParse(body.credentials);
-    if (!creds.success) {
-      throw new AppError('VALIDATION', 'Salesforce url, username, and password are required to read the object schema.', {
-        details: { issues: zodIssues(creds.error) },
+    const parsed = SalesforceBuildSchema.safeParse({
+      credentials: raw.credentials,
+      tables,
+      relationships: Array.isArray(raw.relationships) ? raw.relationships : [],
+      ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+      projectId: raw.projectId,
+      datasourceName: raw.datasourceName,
+      overwrite: raw.overwrite,
+      serverOauthCustom: raw.serverOauthCustom,
+    });
+    if (!parsed.success) {
+      throw new AppError('VALIDATION', 'Invalid Salesforce datasource request. Check the objects, relationships, project, and name.', {
+        details: { issues: zodIssues(parsed.error) },
       });
     }
-    const object = String(body.object ?? '').trim();
-    const projectId = String(body.projectId ?? '').trim();
-    const datasourceName = String(body.datasourceName ?? '').trim();
-    if (!object) throw new AppError('VALIDATION', 'Provide a Salesforce object/table (e.g. Account).');
-    if (!projectId) throw new AppError('VALIDATION', 'Select a Tableau project/folder to publish into.');
-    if (!datasourceName) throw new AppError('VALIDATION', 'Provide a name for the new datasource.');
     const result = await TableauService.buildAndPublishSalesforceDatasource(session, {
-      credentials: creds.data,
-      object,
-      projectId,
-      datasourceName,
-      overwrite: Boolean(body.overwrite),
+      credentials: parsed.data.credentials,
+      tables: parsed.data.tables,
+      relationships: parsed.data.relationships,
+      mode: parsed.data.mode,
+      projectId: parsed.data.projectId,
+      datasourceName: parsed.data.datasourceName,
+      overwrite: Boolean(parsed.data.overwrite),
       // Default true (matches the reference); allow the client to opt into built-in OAuth.
-      serverOauthCustom: body.serverOauthCustom !== false,
+      serverOauthCustom: parsed.data.serverOauthCustom !== false,
     });
     return c.json({
       datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },

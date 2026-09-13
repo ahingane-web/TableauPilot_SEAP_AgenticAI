@@ -36,9 +36,20 @@ import {
   checkWorkbookEditPermission,
 } from './permissions/index.js';
 import { publishWorkbook } from './publishing/index.js';
-import { publishDatasource } from './publishing/datasource.js';
+import {
+  publishDatasource,
+  refreshDatasourceNow,
+  listDatasourceConnections,
+  embedDatasourceConnectionCredential,
+} from './publishing/datasource.js';
 import { randomBytes } from 'node:crypto';
-import { generateSalesforceTds, salesforceToTwbDataType, salesforceToHyperType } from './authoring/tdsGenerator.js';
+import {
+  generateSalesforceTds,
+  generateSalesforceRelationshipsTds,
+  generateSalesforcePhysicalJoinTds,
+  salesforceToTwbDataType,
+  salesforceToHyperType,
+} from './authoring/tdsGenerator.js';
 import { buildExtractTdsx, type ExtractColumn } from './publishing/hyperPackager.js';
 
 /** Result of building/publishing a Salesforce extract datasource (API/UI contract). */
@@ -132,6 +143,39 @@ function salesforceFieldsToMetadata(
     if (!name || seen.has(name)) continue;
     seen.add(name);
     mapped.push(salesforceFieldToDatasourceField(f));
+  }
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+/**
+ * Build DatasourceMetadata for a MULTI-object (relationships) datasource. Field names
+ * are qualified as `Object.Field` so they stay collision-free across joined objects and
+ * match the `[Object.Field]` aliases emitted in the generated `.tds`.
+ */
+function salesforceTablesToMetadata(
+  datasourceId: string,
+  datasourceName: string,
+  tables: Array<{ object: string; fields: SalesforceField[] }>,
+): DatasourceMetadata {
+  const seen = new Set<string>();
+  const mapped: DatasourceField[] = [];
+  for (const t of tables) {
+    for (const f of t.fields) {
+      const name = f.name?.trim();
+      if (!name) continue;
+      const qualified = `${t.object}.${name}`;
+      if (seen.has(qualified)) continue;
+      seen.add(qualified);
+      mapped.push({ ...salesforceFieldToDatasourceField(f), name: qualified });
+    }
   }
   return {
     datasourceId,
@@ -326,7 +370,7 @@ export const TableauService = {
       codeVerifier: pending.codeVerifier,
     });
     const { username } = await SalesforceOauth.fetchUserInfo(token);
-    const sfSession = SalesforceOauth.sessionFromToken(token);
+    const sfSession = await SalesforceOauth.sessionFromToken(token);
     // Password is not applicable for an OAuth-connected source; store the resolved
     // username + login origin so the datasource can be generated. Publishing should
     // use the OAuth credential mode (embed a saved Salesforce OAuth credential).
@@ -338,6 +382,28 @@ export const TableauService = {
   /** The tables listed for the current Salesforce connector session (non-secret). */
   salesforceListedTables(session: Session): SalesforceTable[] {
     return session.connectors?.salesforce?.tables ?? [];
+  },
+
+  /**
+   * Describe a Salesforce object's queryable fields using the transient connector
+   * session established by connect / OAuth. Powers the relationship-builder field
+   * dropdowns. Returns non-secret field identity (name/label/type) only.
+   */
+  async salesforceDescribeObject(
+    session: Session,
+    object: string,
+  ): Promise<Array<{ name: string; label: string; type: string }>> {
+    requireAuth(session);
+    const sf = session.connectors?.salesforce;
+    if (!sf?.sfSession) {
+      throw new AppError('CONNECTOR_API', 'Not connected to Salesforce. Connect first, then add tables.');
+    }
+    const name = String(object ?? '').trim();
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name)) {
+      throw new AppError('VALIDATION', `Invalid Salesforce object name "${object}".`);
+    }
+    const fields = await Salesforce.describeObject(sf.sfSession, name);
+    return fields.map((f) => ({ name: f.name, label: f.label, type: f.type }));
   },
 
   /**
@@ -354,10 +420,21 @@ export const TableauService = {
   async buildAndPublishSalesforceDatasource(
     session: Session,
     input: {
-      /** Salesforce credentials used ONLY to read + extract the object (describe/query). Not embedded. */
+      /** Salesforce credentials used ONLY to read + extract the objects (describe/query). Not embedded. */
       credentials: SalesforceCredentials;
-      /** Salesforce object (SObject) API name, e.g. `Account` or `My_Object__c`. */
-      object: string;
+      /** Salesforce object(s) (SObject API names) to include. One = single-table; many = relationships. */
+      tables: string[];
+      /** Data-modeling edges connecting the objects (empty for a single-table build). */
+      relationships?: Array<{
+        leftObject: string;
+        leftField: string;
+        rightObject: string;
+        rightField: string;
+        cardinality?: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+        joinType?: 'inner' | 'left' | 'right' | 'full';
+      }>;
+      /** Multi-object data-modeling mode: relationships (object-graph) or a physical join. */
+      mode?: 'relationship' | 'join';
       projectId: string;
       datasourceName: string;
       overwrite?: boolean;
@@ -372,13 +449,22 @@ export const TableauService = {
   }> {
     requireAuth(session);
 
-    const object = String(input.object ?? '').trim();
-    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object)) {
-      throw new AppError(
-        'VALIDATION',
-        `Invalid Salesforce object name "${input.object}". Use the SObject API name, e.g. Account or My_Object__c.`,
-      );
+    const tables = (input.tables ?? []).map((t) => String(t ?? '').trim());
+    if (tables.length === 0) {
+      throw new AppError('VALIDATION', 'Select at least one Salesforce object to build a datasource.');
     }
+    for (const object of tables) {
+      if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(object)) {
+        throw new AppError(
+          'VALIDATION',
+          `Invalid Salesforce object name "${object}". Use the SObject API name, e.g. Account or My_Object__c.`,
+        );
+      }
+    }
+    if (new Set(tables).size !== tables.length) {
+      throw new AppError('VALIDATION', 'Duplicate Salesforce objects are not allowed.');
+    }
+    const relationships = input.relationships ?? [];
     const username = String(input.credentials.username ?? '').trim();
     if (!username) {
       throw new AppError('VALIDATION', 'A Salesforce username is required.');
@@ -389,45 +475,103 @@ export const TableauService = {
       throw new AppError('NOT_FOUND', 'Target project not found among your accessible projects.');
     }
 
-    // Sign in to Salesforce to read the object schema AND pull the rows for the extract.
-    // The session/token is used transiently; NO Salesforce credential is embedded into
-    // the published datasource (the extract is static — viewable, not refreshable).
+    // Sign in to Salesforce to read each object's schema AND pull its rows for the extract.
+    // The session/token is used transiently; NO Salesforce credential is embedded into the
+    // published datasource (the extract is static — viewable, not refreshable).
     const sfSession = await Salesforce.login(input.credentials);
     const serverHost = normalizeSalesforceHost(sfSession.instanceUrl);
-    const fields = await Salesforce.describeObject(sfSession, object);
-    if (fields.length === 0) {
-      throw new AppError('CONNECTOR_API', `Salesforce object "${object}" exposes no extractable fields.`);
-    }
-    const fieldNames = fields.map((f) => f.name);
     const maxRows = getConfig().hyper.maxRows;
-    const rows = await Salesforce.queryRecords(sfSession, object, fieldNames, maxRows);
 
-    // Build the `.tds` with an <extract> element backed by a locally materialized
-    // `.hyper` (bundled in the `.tdsx` at this exact path).
+    // Describe + query every object (one Hyper table per object).
+    const described: Array<{ object: string; fields: SalesforceField[]; rows: Array<Array<unknown>> }> = [];
+    for (const object of tables) {
+      const fields = await Salesforce.describeObject(sfSession, object);
+      if (fields.length === 0) {
+        throw new AppError('CONNECTOR_API', `Salesforce object "${object}" exposes no extractable fields.`);
+      }
+      const rows = await Salesforce.queryRecords(sfSession, object, fields.map((f) => f.name), maxRows);
+      described.push({ object, fields, rows });
+    }
+
+    // Validate every relationship's join fields exist on the respective described objects.
+    const fieldSetByObject = new Map(described.map((d) => [d.object, new Set(d.fields.map((f) => f.name))]));
+    for (const r of relationships) {
+      if (!fieldSetByObject.get(r.leftObject)?.has(r.leftField)) {
+        throw new AppError('VALIDATION', `Join field "${r.leftField}" was not found on object "${r.leftObject}".`);
+      }
+      if (!fieldSetByObject.get(r.rightObject)?.has(r.rightField)) {
+        throw new AppError('VALIDATION', `Join field "${r.rightField}" was not found on object "${r.rightObject}".`);
+      }
+    }
+
+    // Build the `.tds` (single-object or relationships) with an <extract> element backed by
+    // a locally materialized `.hyper` (bundled in the `.tdsx` at this exact path).
     const hyperName = `federated_${randomBytes(10).toString('hex')}.hyper`;
-    const tdsXml = generateSalesforceTds({
-      datasourceName: input.datasourceName,
-      serverHost,
-      username,
-      object,
-      authMode: 'oauth',
-      serverOauthCustom: input.serverOauthCustom,
-      fields: fields.map((f) => ({ name: f.name, salesforceType: f.type, nillable: f.nillable })),
-      extract: { hyperDbname: `Data/Extracts/${hyperName}` },
-    });
+    const hyperDbname = `Data/Extracts/${hyperName}`;
+    const isMulti = described.length > 1;
+    const primary = described[0]!; // guaranteed: `tables` has >= 1 entry
+    const mode = input.mode ?? 'relationship';
+
+    let tdsXml: string;
+    if (isMulti) {
+      // Shared multi-object input: same objects, fields, and edges for both models — only
+      // the `.tds` shape differs (object-graph relationships vs a physical `<relation type='join'>`).
+      const multiInput = {
+        datasourceName: input.datasourceName,
+        serverHost,
+        username,
+        authMode: 'oauth' as const,
+        serverOauthCustom: input.serverOauthCustom,
+        tables: described.map((d) => ({
+          object: d.object,
+          fields: d.fields.map((f) => ({ name: f.name, salesforceType: f.type, nillable: f.nillable })),
+        })),
+        relationships: relationships.map((r) => ({
+          leftObject: r.leftObject,
+          leftField: r.leftField,
+          rightObject: r.rightObject,
+          rightField: r.rightField,
+          cardinality: r.cardinality,
+          joinType: r.joinType,
+        })),
+        extract: { hyperDbname },
+      };
+      tdsXml =
+        mode === 'join'
+          ? generateSalesforcePhysicalJoinTds(multiInput)
+          : generateSalesforceRelationshipsTds(multiInput);
+    } else {
+      tdsXml = generateSalesforceTds({
+        datasourceName: input.datasourceName,
+        serverHost,
+        username,
+        object: primary.object,
+        authMode: 'oauth',
+        serverOauthCustom: input.serverOauthCustom,
+        fields: primary.fields.map((f) => ({ name: f.name, salesforceType: f.type, nillable: f.nillable })),
+        extract: { hyperDbname },
+      });
+    }
 
     // Materialize the extract locally and package a `.tdsx` (Python Hyper sidecar).
-    const schema: ExtractColumn[] = fields.map((f) => ({ name: f.name, type: salesforceToHyperType(f.type) }));
-    const tdsxBuffer = await buildExtractTdsx({ tdsXml, object, hyperName, schema, rows });
+    const extractTables = described.map((d) => ({
+      object: d.object,
+      schema: d.fields.map((f) => ({ name: f.name, type: salesforceToHyperType(f.type) })) as ExtractColumn[],
+      rows: d.rows,
+    }));
+    const tdsxBuffer = await buildExtractTdsx({ tdsXml, hyperName, tables: extractTables });
 
-    // Publish the packaged extract. NO connection credentials are embedded — the
-    // datasource renders entirely from the bundled `.hyper`.
+    // Publish the packaged extract AND embed the publishing user's SAVED Salesforce OAuth
+    // credential (matched by the connection `username`) so the datasource can connect and
+    // refresh unattended. The bundled `.hyper` gives immediate data; the embedded credential
+    // makes the extract refreshable (see the runNow refresh below + scheduled refreshes).
     const published = await publishDatasource(getClient(session), {
       siteId: siteId(session),
       projectId: project.id,
       datasourceName: input.datasourceName,
       tdsxBuffer,
       overwrite: input.overwrite,
+      connectionCredentials: { name: username, oAuth: true, embed: true },
     });
 
     // Publishing target for the eventual workbook = where we published the datasource.
@@ -442,20 +586,68 @@ export const TableauService = {
     };
     const lock = this.lockDatasource(session, ds);
 
-    // Cache the described fields so the dashboard flow has real fields IMMEDIATELY,
-    // without waiting on Tableau's async Metadata API indexing of the new datasource.
+    // Cache the described fields so the dashboard flow has real fields IMMEDIATELY, without
+    // waiting on Tableau's async Metadata API indexing. Multi-object fields are qualified
+    // (`Object.Field`) to stay collision-free and match the generated `.tds` aliases.
     session.flow.connectorMetadata = {
       ...(session.flow.connectorMetadata ?? {}),
-      [ds.id]: salesforceFieldsToMetadata(ds.id, ds.name, fields),
+      [ds.id]: isMulti
+        ? salesforceTablesToMetadata(ds.id, ds.name, described.map((d) => ({ object: d.object, fields: d.fields })))
+        : salesforceFieldsToMetadata(ds.id, ds.name, primary.fields),
     };
 
     // Discard any transient connector state now that publishing is complete.
     session.connectors = undefined;
 
-    const rowsCapped = rows.length >= maxRows;
+    // Embed the saved Salesforce OAuth credential on the published connection(s) (matched by
+    // username) so the datasource is CONNECTABLE and the user can refresh it on demand or on a
+    // schedule. Best-effort: a failure (e.g. no saved credential yet) must NOT fail the publish
+    // — the datasource is already usable from the bundled `.hyper`.
+    try {
+      const conns = await listDatasourceConnections(getClient(session), siteId(session), ds.id);
+      for (const conn of conns) {
+        await embedDatasourceConnectionCredential(getClient(session), siteId(session), ds.id, conn.id, {
+          userName: username,
+        });
+      }
+    } catch (err) {
+      log.warn('Could not embed saved credential on datasource connection after publish', {
+        datasourceId: ds.id,
+        error: err instanceof AppError ? err.message : String(err),
+      });
+    }
+
+    // Final step: kick off a server-side extract refresh ("Update Data Source Now") on the
+    // published datasource so Tableau re-pulls the data live using the embedded credential and
+    // records a refresh in the datasource's history. Best-effort — a failure (e.g. no saved
+    // credential yet) must NOT fail the publish, since the bundled `.hyper` already contains
+    // data queried fresh at publish time.
+    // NOTE: for a multi-object datasource (relationships/joins) Tableau rebuilds the extract
+    // with its own engine on refresh; if the refreshed datasource shows only the first table,
+    // it's this server-side rebuild — the bundled extract at publish time contains all tables.
+    let refreshNote = '';
+    try {
+      const { jobId } = await refreshDatasourceNow(getClient(session), siteId(session), ds.id);
+      refreshNote = jobId
+        ? ` Started a server-side extract refresh (job ${jobId}).`
+        : ' Started a server-side extract refresh.';
+    } catch (err) {
+      log.warn('Could not start extract refresh after publish', {
+        datasourceId: ds.id,
+        error: err instanceof AppError ? err.message : String(err),
+      });
+      refreshNote =
+        ' Note: could not start the extract refresh automatically — verify your saved Salesforce credential on Tableau Cloud, then use "Refresh Extracts" on the datasource.';
+    }
+
+    const totalRows = described.reduce((sum, d) => sum + d.rows.length, 0);
+    const anyCapped = described.some((d) => d.rows.length >= maxRows);
+    const tableSummary = isMulti ? ` across ${described.length} tables` : '';
     const extract: ExtractResult = {
       state: 'succeeded',
-      message: `Extract built with ${rows.length.toLocaleString()} row(s)${rowsCapped ? ` (capped at ${maxRows.toLocaleString()})` : ''}.`,
+      message:
+        `Extract built with ${totalRows.toLocaleString()} row(s)${tableSummary}` +
+        `${anyCapped ? ` (some tables capped at ${maxRows.toLocaleString()})` : ''}.${refreshNote}`,
     };
     return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract };
   },

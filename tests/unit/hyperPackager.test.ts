@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { existsSync } from 'node:fs';
 import { unzipSync } from 'fflate';
 import { buildExtractTdsx, type ExtractColumn } from '../../src/tableau/publishing/hyperPackager.js';
-import { generateSalesforceTds } from '../../src/tableau/authoring/tdsGenerator.js';
+import { generateSalesforceTds, generateSalesforceRelationshipsTds } from '../../src/tableau/authoring/tdsGenerator.js';
 import { getConfig } from '../../src/config/env.js';
 
 // The real build shells out to the Python Hyper sidecar. Skip when the virtualenv
@@ -48,5 +48,55 @@ describe.skipIf(!hasVenv)('buildExtractTdsx (real Hyper sidecar)', () => {
     // the .hyper is non-trivial (a real Hyper database file)
     const hyperBytes = entries[`Data/Extracts/${hyperName}`];
     expect(hyperBytes?.length ?? 0).toBeGreaterThan(1000);
+  }, 30_000);
+
+  it('materializes a MULTI-table extract (one Extract.<Object> per object) into one .hyper', async () => {
+    const hyperName = 'federated_multi_test.hyper';
+    const tdsXml = generateSalesforceRelationshipsTds({
+      datasourceName: 'Account + Contact',
+      serverHost: 'x.my.salesforce.com',
+      username: 'u@e.com',
+      tables: [
+        { object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }, { name: 'Name', salesforceType: 'string' }] },
+        { object: 'Contact', fields: [{ name: 'Id', salesforceType: 'id' }, { name: 'AccountId', salesforceType: 'reference' }] },
+      ],
+      relationships: [
+        { leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId', cardinality: 'one-to-many' },
+      ],
+      extract: { hyperDbname: `Data/Extracts/${hyperName}` },
+    });
+
+    const tdsx = await buildExtractTdsx({
+      tdsXml,
+      hyperName,
+      tables: [
+        {
+          object: 'Account',
+          schema: [
+            { name: 'Id', type: 'text' },
+            { name: 'Name', type: 'text' },
+          ] as ExtractColumn[],
+          rows: [
+            ['001', 'Acme'],
+            ['002', 'Globex'],
+          ],
+        },
+        {
+          object: 'Contact',
+          schema: [
+            { name: 'Id', type: 'text' },
+            { name: 'AccountId', type: 'text' },
+          ] as ExtractColumn[],
+          rows: [['003', '001']],
+        },
+      ],
+    });
+
+    expect(Buffer.isBuffer(tdsx)).toBe(true);
+    const entries = unzipSync(new Uint8Array(tdsx));
+    const names = Object.keys(entries);
+    expect(names.some((n) => n.endsWith('.tds'))).toBe(true);
+    expect(names).toContain(`Data/Extracts/${hyperName}`);
+    expect(entries[`Data/Extracts/${hyperName}`]?.length ?? 0).toBeGreaterThan(1000);
   }, 30_000);
 });

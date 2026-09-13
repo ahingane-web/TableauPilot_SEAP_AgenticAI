@@ -150,7 +150,8 @@ def _load_schema(path: str) -> List[Tuple[str, str]]:
     return cols
 
 
-def _write_hyper(hyper_path: str, object_name: str, columns: List[Tuple[str, str]], data_path: str) -> int:
+def _insert_table(connection, object_name: str, columns: List[Tuple[str, str]], data_path: str) -> int:
+    """Create Extract.\"<object>\" and stream its rows in. Returns the row count."""
     table = TableName("Extract", object_name)
     table_def = TableDefinition(
         table_name=table,
@@ -160,29 +161,40 @@ def _write_hyper(hyper_path: str, object_name: str, columns: List[Tuple[str, str
     ncols = len(columns)
     rows = 0
 
+    connection.catalog.create_table(table_def)
+    with Inserter(connection, table) as inserter:
+        if os.path.exists(data_path):
+            with open(data_path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    values = json.loads(line)
+                    # Align to schema (pad/truncate defensively).
+                    row = [
+                        coercers[i](values[i] if i < len(values) else None)
+                        for i in range(ncols)
+                    ]
+                    inserter.add_row(row)
+                    rows += 1
+        inserter.execute()
+    return rows
+
+
+def _write_hyper(hyper_path: str, tables: List[Tuple[str, List[Tuple[str, str]], str]]) -> int:
+    """Write ALL extract tables into a single .hyper under the shared `Extract` schema.
+
+    `tables` is a list of (object_name, columns, data_path). Returns total rows.
+    """
+    total = 0
     with HyperProcess(telemetry=Telemetry.DO_NOT_SEND_USAGE_DATA_TO_TABLEAU) as hyper:
         with Connection(
             endpoint=hyper.endpoint, database=hyper_path, create_mode=CreateMode.CREATE_AND_REPLACE
         ) as connection:
             connection.catalog.create_schema("Extract")
-            connection.catalog.create_table(table_def)
-            with Inserter(connection, table) as inserter:
-                if os.path.exists(data_path):
-                    with open(data_path, "r", encoding="utf-8") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            values = json.loads(line)
-                            # Align to schema (pad/truncate defensively).
-                            row = [
-                                coercers[i](values[i] if i < len(values) else None)
-                                for i in range(ncols)
-                            ]
-                            inserter.add_row(row)
-                            rows += 1
-                inserter.execute()
-    return rows
+            for (object_name, columns, data_path) in tables:
+                total += _insert_table(connection, object_name, columns, data_path)
+    return total
 
 
 def _build_tdsx(out_path: str, tds_path: str, hyper_path: str, hyper_name: str) -> None:
@@ -194,22 +206,46 @@ def _build_tdsx(out_path: str, tds_path: str, hyper_path: str, hyper_name: str) 
         zf.write(hyper_path, arcname="Data/Extracts/%s" % hyper_name)
 
 
+def _parse_table_arg(value: str) -> Tuple[str, str, str]:
+    """Parse a `--table object:schemaPath:dataPath` value.
+
+    The object is a validated identifier and the paths live under a colon-free temp
+    directory, so splitting into exactly three parts is unambiguous.
+    """
+    parts = value.split(":")
+    if len(parts) != 3:
+        raise ValueError("--table expects 'object:schemaPath:dataPath', got %r" % value)
+    return parts[0], parts[1], parts[2]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a .tdsx from a .tds + local Salesforce extract")
     parser.add_argument("--tds", required=True, help="Path to the generated .tds XML")
-    parser.add_argument("--schema", required=True, help="Path to schema.json (column name/type list)")
-    parser.add_argument("--data", required=True, help="Path to data.ndjson (row-aligned JSON arrays)")
-    parser.add_argument("--object", required=True, help="Salesforce object / extract table name")
     parser.add_argument("--hyper-name", required=True, help="Extract .hyper filename inside Data/Extracts/")
     parser.add_argument("--out", required=True, help="Output .tdsx path")
+    # Multi-table (relationships) form: repeatable 'object:schemaPath:dataPath'.
+    parser.add_argument("--table", action="append", default=[], help="object:schemaPath:dataPath (repeatable)")
+    # Legacy single-table form (kept for back-compat).
+    parser.add_argument("--schema", help="Path to schema.json (column name/type list)")
+    parser.add_argument("--data", help="Path to data.ndjson (row-aligned JSON arrays)")
+    parser.add_argument("--object", help="Salesforce object / extract table name")
     args = parser.parse_args()
 
-    columns = _load_schema(args.schema)
+    # Build the (object, columns, data_path) list from either form.
+    tables: List[Tuple[str, List[Tuple[str, str]], str]] = []
+    if args.table:
+        for raw in args.table:
+            obj, schema_path, data_path = _parse_table_arg(raw)
+            tables.append((obj, _load_schema(schema_path), data_path))
+    elif args.object and args.schema and args.data:
+        tables.append((args.object, _load_schema(args.schema), args.data))
+    else:
+        parser.error("provide at least one --table, or the legacy --object/--schema/--data trio")
 
     tmp_dir = tempfile.mkdtemp(prefix="tp_hyper_")
     hyper_path = os.path.join(tmp_dir, args.hyper_name)
     try:
-        rows = _write_hyper(hyper_path, args.object, columns, args.data)
+        rows = _write_hyper(hyper_path, tables)
         _build_tdsx(args.out, args.tds, hyper_path, args.hyper_name)
     finally:
         try:
@@ -219,7 +255,7 @@ def main() -> int:
         except OSError:
             pass
 
-    json.dump({"rows": rows, "out": args.out}, sys.stdout)
+    json.dump({"rows": rows, "tables": len(tables), "out": args.out}, sys.stdout)
     sys.stdout.write("\n")
     return 0
 

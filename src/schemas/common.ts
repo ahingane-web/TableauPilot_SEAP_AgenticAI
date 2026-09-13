@@ -125,6 +125,168 @@ export const SalesforceCredentialsSchema = z.object({
 });
 export type SalesforceCredentialsInput = z.infer<typeof SalesforceCredentialsSchema>;
 
+/** Salesforce SObject API name (e.g. `Account`, `My_Object__c`). Constrained to valid identifiers. */
+export const SalesforceObjectNameSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Expected a Salesforce SObject API name, e.g. Account or My_Object__c');
+
+/** Salesforce field API name. Same identifier grammar as an object name. */
+export const SalesforceFieldNameSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Expected a Salesforce field API name, e.g. Id or AccountId');
+
+/**
+ * Relationship cardinality between two joined objects. Tableau's relationships model
+ * does NOT store a SQL join type; instead the "one" side(s) are marked as unique keys,
+ * and Tableau chooses the physical join at query time. This maps a friendly cardinality
+ * onto the `unique-key`/`is-db-set-unique-key` end-point flags observed in the reference
+ * (`reference/sample_datasource_DataModelling.tds`).
+ *   - many-to-one : right side unique (default; e.g. Opportunity -> Account)
+ *   - one-to-many : left side unique
+ *   - one-to-one  : both sides unique
+ *   - many-to-many: neither side unique
+ */
+export const SalesforceCardinalitySchema = z.enum(['one-to-one', 'one-to-many', 'many-to-one', 'many-to-many']);
+export type SalesforceCardinality = z.infer<typeof SalesforceCardinalitySchema>;
+
+/**
+ * SQL join type for the PHYSICAL-join mode (`mode: 'join'`). Unlike the relationships
+ * model (which uses {@link SalesforceCardinalitySchema}), a physical join emits an actual
+ * `<relation type='join' join='...'>` in the `.tds`, so the join type is stored verbatim.
+ *   - left  : LEFT OUTER (default; e.g. Opportunity LEFT JOIN Account)
+ *   - inner : INNER
+ *   - right : RIGHT OUTER
+ *   - full  : FULL OUTER
+ */
+export const SalesforceJoinTypeSchema = z.enum(['inner', 'left', 'right', 'full']);
+export type SalesforceJoinType = z.infer<typeof SalesforceJoinTypeSchema>;
+
+/**
+ * A single relationship (data-modeling edge) between two objects: a matching field pair
+ * plus cardinality (relationship mode) and joinType (join mode). `leftObject`/`rightObject`
+ * must both appear in the build's `tables`. `cardinality` is consumed by the relationships
+ * model; `joinType` by the physical-join model — the build's `mode` selects which one wins.
+ */
+export const SalesforceRelationshipSchema = z.object({
+  leftObject: SalesforceObjectNameSchema,
+  leftField: SalesforceFieldNameSchema,
+  rightObject: SalesforceObjectNameSchema,
+  rightField: SalesforceFieldNameSchema,
+  cardinality: SalesforceCardinalitySchema.default('many-to-many'),
+  joinType: SalesforceJoinTypeSchema.default('left'),
+});
+export type SalesforceRelationship = z.infer<typeof SalesforceRelationshipSchema>;
+
+/**
+ * Data-modeling mode for a multi-object build:
+ *   - relationship : Tableau's relationships (object-graph) model with cardinality.
+ *   - join         : a physical join (`<relation type='join'>`) with a SQL join type.
+ * Defaults to `relationship` (matches `reference/sample_datasource_DataModelling.tds`).
+ */
+export const SalesforceBuildModeSchema = z.enum(['relationship', 'join']);
+export type SalesforceBuildMode = z.infer<typeof SalesforceBuildModeSchema>;
+
+/**
+ * Payload for building a (optionally multi-object) Salesforce extract datasource.
+ * A single-object build sends `tables: [object], relationships: []` and behaves exactly
+ * as before. Multi-object builds must provide relationships that connect every table into
+ * a single graph (at least `tables.length - 1` edges, all connected).
+ */
+export const SalesforceBuildSchema = z
+  .object({
+    credentials: SalesforceCredentialsSchema,
+    tables: z.array(SalesforceObjectNameSchema).min(1, 'Select at least one Salesforce object'),
+    relationships: z.array(SalesforceRelationshipSchema).default([]),
+    mode: SalesforceBuildModeSchema.default('relationship'),
+    projectId: z.string().trim().min(1, 'Select a Tableau project/folder to publish into'),
+    datasourceName: z.string().trim().min(1, 'Provide a name for the new datasource'),
+    overwrite: z.boolean().optional(),
+    serverOauthCustom: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const tables = val.tables.map((t) => t.trim());
+    const unique = new Set(tables);
+    if (unique.size !== tables.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['tables'], message: 'Duplicate objects are not allowed.' });
+    }
+    if (tables.length === 1) {
+      if (val.relationships.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships'],
+          message: 'A single-object datasource cannot have relationships.',
+        });
+      }
+      return;
+    }
+    // Multi-object: every relationship endpoint must be a selected table, and the
+    // relationships must connect all tables into ONE graph.
+    for (const [i, r] of val.relationships.entries()) {
+      if (!unique.has(r.leftObject.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'leftObject'],
+          message: `Relationship references "${r.leftObject}", which is not one of the selected objects.`,
+        });
+      }
+      if (!unique.has(r.rightObject.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'rightObject'],
+          message: `Relationship references "${r.rightObject}", which is not one of the selected objects.`,
+        });
+      }
+      if (r.leftObject.trim() === r.rightObject.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i],
+          message: 'A relationship must connect two different objects.',
+        });
+      }
+    }
+    if (val.relationships.length < tables.length - 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: `Need at least ${tables.length - 1} relationship(s) to connect ${tables.length} objects.`,
+      });
+      return;
+    }
+    if (!isConnected(tables, val.relationships)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: 'The relationships must connect every object into a single joined model.',
+      });
+    }
+  });
+export type SalesforceBuildInput = z.infer<typeof SalesforceBuildSchema>;
+
+/** Union-find connectivity check: do the relationship edges connect all tables? */
+function isConnected(tables: string[], relationships: Array<{ leftObject: string; rightObject: string }>): boolean {
+  const parent = new Map<string, string>();
+  for (const t of tables) parent.set(t, t);
+  const find = (x: string): string => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  for (const r of relationships) {
+    const l = r.leftObject.trim();
+    const rt = r.rightObject.trim();
+    if (parent.has(l) && parent.has(rt)) union(l, rt);
+  }
+  const roots = new Set(tables.map((t) => find(t)));
+  return roots.size === 1;
+}
+
 /** A strict lock capturing the single source-of-truth datasource for a session. */
 export const DatasourceLockSchema = z.object({
   datasourceId: z.string().min(1),

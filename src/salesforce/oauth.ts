@@ -13,7 +13,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { redactString } from '../utils/redaction.js';
-import { normalizeLoginUrl, SALESFORCE_API_VERSION, type SalesforceSession } from './client.js';
+import { normalizeLoginUrl, resolveLatestApiVersion, SALESFORCE_API_VERSION, type SalesforceSession } from './client.js';
 
 const log = logger.child('salesforce:oauth');
 
@@ -156,7 +156,11 @@ export async function fetchUserInfo(token: SalesforceTokenResult): Promise<{ use
   return { username };
 }
 
-/** Build a {@link SalesforceSession} from an OAuth token result. */
-export function sessionFromToken(token: SalesforceTokenResult): SalesforceSession {
-  return { instanceUrl: token.instanceUrl, accessToken: token.accessToken, apiVersion: SALESFORCE_API_VERSION };
+/**
+ * Build a {@link SalesforceSession} from an OAuth token result, resolving the newest
+ * REST API version the org serves (falls back to {@link SALESFORCE_API_VERSION}).
+ */
+export async function sessionFromToken(token: SalesforceTokenResult): Promise<SalesforceSession> {
+  const apiVersion = await resolveLatestApiVersion(token.instanceUrl, token.accessToken, SALESFORCE_API_VERSION);
+  return { instanceUrl: token.instanceUrl, accessToken: token.accessToken, apiVersion };
 }

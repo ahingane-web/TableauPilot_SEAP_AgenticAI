@@ -129,11 +129,29 @@ export const api = {
     req<{ authUrl: string; redirectUri: string }>('/api/connectors/salesforce/oauth/start', { method: 'POST', body }),
   salesforceTables: () =>
     req<{ tables: { name: string; label: string }[] }>('/api/connectors/salesforce/tables'),
-  // Build a live Salesforce datasource. Credentials are used only to read the object
-  // schema (describe); publishing uses the SAVED Salesforce OAuth credential on Tableau Cloud.
+  // Describe an object's fields (name/label/type) for the relationship builder dropdowns.
+  salesforceDescribe: (object: string) =>
+    req<{ fields: { name: string; label: string; type: string }[] }>('/api/connectors/salesforce/describe', {
+      method: 'POST',
+      body: { object },
+    }),
+  // Build a Salesforce extract datasource (single object, or multiple joined via
+  // relationships). Credentials are used only to read the object schema (describe);
+  // publishing uses the SAVED Salesforce OAuth credential on Tableau Cloud.
   salesforcePublish: (body: {
     credentials: { url: string; username: string; password: string; token?: string };
-    object: string;
+    /** One object = single-table; multiple = relationships datasource. */
+    tables: string[];
+    relationships?: Array<{
+      leftObject: string;
+      leftField: string;
+      rightObject: string;
+      rightField: string;
+      cardinality?: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+      joinType?: 'inner' | 'left' | 'right' | 'full';
+    }>;
+    /** Multi-object data-modeling mode; defaults to 'relationship' server-side. */
+    mode?: 'relationship' | 'join';
     projectId: string;
     datasourceName: string;
     overwrite?: boolean;

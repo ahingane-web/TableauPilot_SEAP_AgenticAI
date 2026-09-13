@@ -28,17 +28,30 @@ export interface ExtractColumn {
   type: HyperColumnType;
 }
 
-export interface BuildExtractTdsxInput {
-  /** The generated `.tds` XML (its extract `dbname` must be `Data/Extracts/<hyperName>`). */
-  tdsXml: string;
-  /** Salesforce object / extract table name. */
+/** One extract table: an object plus its column schema and row data. */
+export interface ExtractTable {
+  /** Salesforce object / extract table name (becomes `Extract."<object>"`). */
   object: string;
-  /** Extract `.hyper` filename bundled under `Data/Extracts/` (matches the `.tds` dbname). */
-  hyperName: string;
   /** Column schema (order defines the row-array alignment). */
   schema: ExtractColumn[];
   /** Rows as arrays aligned to `schema` order (values are JSON-serialisable). */
   rows: Array<Array<unknown>>;
+}
+
+export interface BuildExtractTdsxInput {
+  /** The generated `.tds` XML (its extract `dbname` must be `Data/Extracts/<hyperName>`). */
+  tdsXml: string;
+  /** Extract `.hyper` filename bundled under `Data/Extracts/` (matches the `.tds` dbname). */
+  hyperName: string;
+  /**
+   * Multi-table (relationships) form: one entry per joined object. Each becomes its own
+   * `Extract."<object>"` table inside the single `.hyper`.
+   */
+  tables?: ExtractTable[];
+  /** Legacy single-table form (kept for back-compat with the single-object flow). */
+  object?: string;
+  schema?: ExtractColumn[];
+  rows?: Array<Array<unknown>>;
 }
 
 const SETUP_HINT = 'Run `npm run setup:hyper` to create the .venv-hyper virtualenv with the Tableau Hyper API.';
@@ -58,28 +71,44 @@ export async function buildExtractTdsx(input: BuildExtractTdsxInput): Promise<Bu
     });
   }
 
+  // Normalize the legacy single-table form into the multi-table list.
+  const tables: ExtractTable[] =
+    input.tables && input.tables.length > 0
+      ? input.tables
+      : input.object
+        ? [{ object: input.object, schema: input.schema ?? [], rows: input.rows ?? [] }]
+        : [];
+  if (tables.length === 0) {
+    throw new AppError('TABLEAU_API', 'No extract tables were provided to build the datasource.', {
+      hint: 'Select at least one Salesforce object.',
+    });
+  }
+
   const dir = await mkdtemp(join(tmpdir(), 'tp-hyper-'));
   const tdsPath = join(dir, 'datasource.tds');
-  const schemaPath = join(dir, 'schema.json');
-  const dataPath = join(dir, 'data.ndjson');
   const outPath = join(dir, 'extract.tdsx');
 
   try {
-    const ndjson = input.rows.map((row) => JSON.stringify(row)).join('\n') + (input.rows.length ? '\n' : '');
-    await Promise.all([
-      writeFile(tdsPath, input.tdsXml, 'utf8'),
-      writeFile(schemaPath, JSON.stringify(input.schema), 'utf8'),
-      writeFile(dataPath, ndjson, 'utf8'),
-    ]);
+    const writes: Array<Promise<void>> = [writeFile(tdsPath, input.tdsXml, 'utf8')];
+    const tableArgs: string[] = [];
+    tables.forEach((t, i) => {
+      const schemaPath = join(dir, `schema_${i}.json`);
+      const dataPath = join(dir, `data_${i}.ndjson`);
+      const ndjson = t.rows.map((row) => JSON.stringify(row)).join('\n') + (t.rows.length ? '\n' : '');
+      writes.push(writeFile(schemaPath, JSON.stringify(t.schema), 'utf8'));
+      writes.push(writeFile(dataPath, ndjson, 'utf8'));
+      // `object:schemaPath:dataPath` — object is a validated identifier and the paths
+      // live under our colon-free temp dir, so the delimiter is unambiguous.
+      tableArgs.push('--table', `${t.object}:${schemaPath}:${dataPath}`);
+    });
+    await Promise.all(writes);
 
     await runPython(python, [
       scriptPath,
       '--tds', tdsPath,
-      '--schema', schemaPath,
-      '--data', dataPath,
-      '--object', input.object,
       '--hyper-name', input.hyperName,
       '--out', outPath,
+      ...tableArgs,
     ]);
 
     return await readFile(outPath);

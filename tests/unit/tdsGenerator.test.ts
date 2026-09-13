@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   generateSalesforceTds,
+  generateSalesforceRelationshipsTds,
+  generateSalesforcePhysicalJoinTds,
   salesforceToTwbDataType,
   authAttrForMode,
   DEFAULT_SALESFORCE_API_VERSION,
@@ -208,6 +210,296 @@ describe('generateSalesforceTds', () => {
         serverHost: 'x.my.salesforce.com',
         username: 'u@e.com',
         object: 'Account; DROP',
+      }),
+    ).toThrow();
+  });
+});
+
+describe('generateSalesforceRelationshipsTds', () => {
+  const rel = generateSalesforceRelationshipsTds({
+    datasourceName: 'Opp Account Contact',
+    serverHost: 'storm-4e502ee95bef89.my.salesforce.com',
+    username: 'user@example.com',
+    tables: [
+      {
+        object: 'Opportunity',
+        fields: [
+          { name: 'Id', salesforceType: 'id' },
+          { name: 'AccountId', salesforceType: 'reference' },
+          { name: 'Amount', salesforceType: 'double' },
+        ],
+      },
+      {
+        object: 'Account',
+        fields: [
+          { name: 'Id', salesforceType: 'id' },
+          { name: 'Name', salesforceType: 'string' },
+          { name: 'AnnualRevenue', salesforceType: 'double' },
+        ],
+      },
+      {
+        object: 'Contact',
+        fields: [
+          { name: 'Id', salesforceType: 'id' },
+          { name: 'AccountId', salesforceType: 'reference' },
+          { name: 'LastName', salesforceType: 'string' },
+        ],
+      },
+    ],
+    relationships: [
+      { leftObject: 'Opportunity', leftField: 'AccountId', rightObject: 'Account', rightField: 'Id', cardinality: 'many-to-one' },
+      { leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId', cardinality: 'one-to-many' },
+    ],
+    extract: { hyperDbname: 'Data/Extracts/federated_rel.hyper' },
+  });
+
+  it('wraps the physical tables in a <relation type=collection>', () => {
+    expect(rel).toContain("<relation type='collection'>");
+    expect(rel).toContain("<relation connection='salesforce.tableaupilot' name='Opportunity' table='[Opportunity]' type='table' />");
+    expect(rel).toContain("<relation connection='salesforce.tableaupilot' name='Account' table='[Account]' type='table' />");
+    expect(rel).toContain("<relation connection='salesforce.tableaupilot' name='Contact' table='[Contact]' type='table' />");
+  });
+
+  it('emits UNIQUE [Object.Field] cols + columns to avoid cross-object name collisions', () => {
+    // `Id` exists on all three objects but each alias is disambiguated by object.
+    expect(rel).toContain("<map key='[Opportunity.Id]' value='[Opportunity].[Id]' />");
+    expect(rel).toContain("<map key='[Account.Id]' value='[Account].[Id]' />");
+    expect(rel).toContain("<map key='[Contact.Id]' value='[Contact].[Id]' />");
+    expect(rel).toContain("<map key='[Opportunity.AccountId]' value='[Opportunity].[AccountId]' />");
+    expect(rel).toContain("<column datatype='string' name='[Account.Name]' role='dimension' type='nominal' />");
+    expect(rel).toContain("<column datatype='real' name='[Account.AnnualRevenue]' role='measure' type='quantitative' />");
+  });
+
+  it('uses unique [Object.Field] local-names in metadata-records (prevents Duplicate field name)', () => {
+    // `Id` exists on all three objects; each metadata-record must have a UNIQUE local-name
+    // or Tableau fails to load/refresh with "Duplicate field name 'Id'".
+    expect(rel).toContain('<local-name>[Opportunity.Id]</local-name>');
+    expect(rel).toContain('<local-name>[Account.Id]</local-name>');
+    expect(rel).toContain('<local-name>[Contact.Id]</local-name>');
+    expect(rel).not.toContain('<local-name>[Id]</local-name>');
+    // remote-name keeps the raw Salesforce API name (scoped by parent-name).
+    expect(rel).toContain('<remote-name>Id</remote-name>');
+    expect(rel).toContain('<parent-name>[Account]</parent-name>');
+  });
+
+  it('emits a multi-table extract (one Extract.<Object> relation per object, empty extract object-id)', () => {
+    expect(rel).toContain("<extract count='-1' enabled='true' object-id='' units='records'");
+    expect(rel).toContain(
+      "<connection authentication='auth-none' class='hyper' dbname='Data/Extracts/federated_rel.hyper' " +
+        "default-settings='yes' schema='Extract' tablename='Extract'>",
+    );
+    expect(rel).toContain("<relation name='Opportunity' table='[Extract].[Opportunity]' type='table' />");
+    expect(rel).toContain("<relation name='Account' table='[Extract].[Account]' type='table' />");
+    expect(rel).toContain("<relation name='Contact' table='[Extract].[Contact]' type='table' />");
+  });
+
+  it('emits an <object-graph> with one <object> per table (physical + extract properties)', () => {
+    expect(rel).toContain('<object-graph>');
+    expect(rel).toContain("<object caption='Account' id='Account (Account)_");
+    expect(rel).toContain("<properties context=''>");
+    expect(rel).toContain("<properties context='extract'>");
+    expect(rel).toContain("<relation name='Account' table='[Extract].[Account]' type='table' />");
+  });
+
+  it('emits <relationship> expressions over the join-field aliases', () => {
+    expect(rel).toContain('<relationships>');
+    expect(rel).toContain("<expression op='='>");
+    expect(rel).toContain("<expression op='[Opportunity.AccountId]' />");
+    expect(rel).toContain("<expression op='[Account.Id]' />");
+    expect(rel).toContain("<expression op='[Contact.AccountId]' />");
+  });
+
+  it('maps cardinality onto end-point unique-key flags', () => {
+    // many-to-one -> RIGHT (Account) unique; one-to-many -> LEFT (Account) unique.
+    expect(rel).toContain("unique-key='true'");
+    expect(rel).toContain("is-db-set-unique-key='true'");
+    // The Account object-id appears as a unique end-point in both relationships.
+    const accountId = rel.match(/id='(Account \(Account\)_[0-9A-F]+)'/)?.[1];
+    expect(accountId).toBeTruthy();
+    expect(rel).toContain(`is-db-set-unique-key='true' object-id='${accountId}' unique-key='true'`);
+  });
+
+  it('requires at least two tables', () => {
+    expect(() =>
+      generateSalesforceRelationshipsTds({
+        datasourceName: 'X',
+        serverHost: 'x.my.salesforce.com',
+        username: 'u@e.com',
+        tables: [{ object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] }],
+        relationships: [],
+        extract: { hyperDbname: 'Data/Extracts/x.hyper' },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects an invalid object name', () => {
+    expect(() =>
+      generateSalesforceRelationshipsTds({
+        datasourceName: 'X',
+        serverHost: 'x.my.salesforce.com',
+        username: 'u@e.com',
+        tables: [
+          { object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] },
+          { object: 'Bad; DROP', fields: [{ name: 'Id', salesforceType: 'id' }] },
+        ],
+        relationships: [],
+        extract: { hyperDbname: 'Data/Extracts/x.hyper' },
+      }),
+    ).toThrow();
+  });
+
+  it('defaults an omitted cardinality to many-to-many (neither end-point unique)', () => {
+    const noCard = generateSalesforceRelationshipsTds({
+      datasourceName: 'X',
+      serverHost: 'x.my.salesforce.com',
+      username: 'u@e.com',
+      tables: [
+        { object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] },
+        { object: 'Contact', fields: [{ name: 'AccountId', salesforceType: 'reference' }] },
+      ],
+      // cardinality omitted -> should fall back to many-to-many.
+      relationships: [{ leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId' }],
+      extract: { hyperDbname: 'Data/Extracts/x.hyper' },
+    });
+    // many-to-many => neither side unique.
+    expect(noCard).not.toContain("unique-key='true'");
+    expect(noCard).not.toContain("is-db-set-unique-key='true'");
+  });
+});
+
+describe('generateSalesforcePhysicalJoinTds', () => {
+  const join = generateSalesforcePhysicalJoinTds({
+    datasourceName: 'Opp Account Contact (Join)',
+    serverHost: 'storm-4e502ee95bef89.my.salesforce.com',
+    username: 'user@example.com',
+    tables: [
+      {
+        object: 'Opportunity',
+        fields: [
+          { name: 'Id', salesforceType: 'id' },
+          { name: 'AccountId', salesforceType: 'reference' },
+          { name: 'Amount', salesforceType: 'double' },
+        ],
+      },
+      {
+        object: 'Account',
+        fields: [
+          { name: 'Id', salesforceType: 'id' },
+          { name: 'Name', salesforceType: 'string' },
+        ],
+      },
+      {
+        object: 'Contact',
+        fields: [
+          { name: 'Id', salesforceType: 'id' },
+          { name: 'AccountId', salesforceType: 'reference' },
+        ],
+      },
+    ],
+    relationships: [
+      { leftObject: 'Opportunity', leftField: 'AccountId', rightObject: 'Account', rightField: 'Id', joinType: 'left' },
+      { leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId', joinType: 'inner' },
+    ],
+    extract: { hyperDbname: 'Data/Extracts/federated_join.hyper' },
+  });
+
+  it('emits a left-deep <relation type=join> tree over the LIVE tables (no collection)', () => {
+    expect(join).not.toContain("<relation type='collection'>");
+    expect(join).toContain("<relation join='left' type='join'>");
+    expect(join).toContain("<relation join='inner' type='join'>");
+    // Leaves reference the live tables via the named connection.
+    expect(join).toContain("<relation connection='salesforce.tableaupilot' name='Opportunity' table='[Opportunity]' type='table' />");
+    expect(join).toContain("<relation connection='salesforce.tableaupilot' name='Account' table='[Account]' type='table' />");
+    expect(join).toContain("<relation connection='salesforce.tableaupilot' name='Contact' table='[Contact]' type='table' />");
+  });
+
+  it('emits <clause type=join> ON-conditions over PHYSICAL [Object].[Field] columns', () => {
+    expect(join).toContain("<clause type='join'>");
+    expect(join).toContain("<expression op='[Opportunity].[AccountId]' />");
+    expect(join).toContain("<expression op='[Account].[Id]' />");
+    expect(join).toContain("<expression op='[Contact].[AccountId]' />");
+  });
+
+  it('mirrors the join tree inside the <extract> over the Extract.<Object> hyper tables', () => {
+    expect(join).toContain(
+      "<connection authentication='auth-none' class='hyper' dbname='Data/Extracts/federated_join.hyper' " +
+        "default-settings='yes' schema='Extract' tablename='Extract'>",
+    );
+    expect(join).toContain("<relation name='Opportunity' table='[Extract].[Opportunity]' type='table' />");
+    expect(join).toContain("<relation name='Account' table='[Extract].[Account]' type='table' />");
+    expect(join).toContain("<relation name='Contact' table='[Extract].[Contact]' type='table' />");
+  });
+
+  it('reuses the unique [Object.Field] cols/metadata/columns (no duplicate-name collision)', () => {
+    expect(join).toContain("<map key='[Opportunity.Id]' value='[Opportunity].[Id]' />");
+    expect(join).toContain("<map key='[Account.Id]' value='[Account].[Id]' />");
+    expect(join).toContain('<local-name>[Contact.Id]</local-name>');
+    expect(join).not.toContain('<local-name>[Id]</local-name>');
+    expect(join).toContain("<column datatype='string' name='[Account.Name]' role='dimension' type='nominal' />");
+  });
+
+  it('does NOT emit an <object-graph> (the join is purely physical)', () => {
+    expect(join).not.toContain('<object-graph>');
+    expect(join).not.toContain('<relationships>');
+  });
+
+  it('defaults an omitted joinType to left', () => {
+    const dflt = generateSalesforcePhysicalJoinTds({
+      datasourceName: 'X',
+      serverHost: 'x.my.salesforce.com',
+      username: 'u@e.com',
+      tables: [
+        { object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] },
+        { object: 'Contact', fields: [{ name: 'AccountId', salesforceType: 'reference' }] },
+      ],
+      relationships: [{ leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId' }],
+      extract: { hyperDbname: 'Data/Extracts/x.hyper' },
+    });
+    expect(dflt).toContain("<relation join='left' type='join'>");
+  });
+
+  it('supports right and full outer join types', () => {
+    const build = (joinType: 'right' | 'full'): string =>
+      generateSalesforcePhysicalJoinTds({
+        datasourceName: 'X',
+        serverHost: 'x.my.salesforce.com',
+        username: 'u@e.com',
+        tables: [
+          { object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] },
+          { object: 'Contact', fields: [{ name: 'AccountId', salesforceType: 'reference' }] },
+        ],
+        relationships: [{ leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId', joinType }],
+        extract: { hyperDbname: 'Data/Extracts/x.hyper' },
+      });
+    expect(build('right')).toContain("<relation join='right' type='join'>");
+    expect(build('full')).toContain("<relation join='full' type='join'>");
+  });
+
+  it('requires at least two tables', () => {
+    expect(() =>
+      generateSalesforcePhysicalJoinTds({
+        datasourceName: 'X',
+        serverHost: 'x.my.salesforce.com',
+        username: 'u@e.com',
+        tables: [{ object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] }],
+        relationships: [],
+        extract: { hyperDbname: 'Data/Extracts/x.hyper' },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects an invalid object name', () => {
+    expect(() =>
+      generateSalesforcePhysicalJoinTds({
+        datasourceName: 'X',
+        serverHost: 'x.my.salesforce.com',
+        username: 'u@e.com',
+        tables: [
+          { object: 'Account', fields: [{ name: 'Id', salesforceType: 'id' }] },
+          { object: 'Bad; DROP', fields: [{ name: 'Id', salesforceType: 'id' }] },
+        ],
+        relationships: [],
+        extract: { hyperDbname: 'Data/Extracts/x.hyper' },
       }),
     ).toThrow();
   });

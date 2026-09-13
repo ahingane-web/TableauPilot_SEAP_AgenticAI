@@ -3,6 +3,32 @@ import { api } from '../api';
 import type { DatasourceMetadataView, NamedItem, SessionContext } from '../types';
 import { Busy, ErrorPanel } from './common';
 
+/** Relationship cardinality options shown in the relationship builder. */
+type SfCardinality = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+
+/** SQL join type options shown in the physical-join builder. */
+type SfJoinType = 'inner' | 'left' | 'right' | 'full';
+
+/** Multi-object data-modeling mode: Tableau relationships vs a physical join. */
+type SfMode = 'relationship' | 'join';
+
+/** A data-modeling edge between two objects (built by {@link SalesforceBuild}). */
+interface SfRelationship {
+  leftObject: string;
+  leftField: string;
+  rightObject: string;
+  rightField: string;
+  cardinality: SfCardinality;
+  joinType: SfJoinType;
+}
+
+/** A described Salesforce field (name/label/type), used for the join-field dropdowns. */
+interface SfFieldInfo {
+  name: string;
+  label: string;
+  type: string;
+}
+
 /**
  * Connect + select destination project + select and LOCK the datasource.
  * The datasource lock is the single source of truth; changing it requires an
@@ -29,7 +55,6 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
   const [sfUsername, setSfUsername] = useState('');
   const [sfPassword, setSfPassword] = useState('');
   const [sfToken, setSfToken] = useState('');
-  const [sfObject, setSfObject] = useState('');
   const [sfProjectId, setSfProjectId] = useState('');
   const [sfDsName, setSfDsName] = useState('');
   const [sfOverwrite, setSfOverwrite] = useState(false);
@@ -98,15 +123,17 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
     }
   }
 
-  async function publishSalesforce(): Promise<void> {
-    if (!sfUrl || !sfUsername || !sfPassword || !sfObject || !sfProjectId || !sfDsName) return;
+  async function publishSalesforce(tables: string[], relationships: SfRelationship[], mode: SfMode): Promise<void> {
+    if (!sfUrl || !sfUsername || !sfPassword || tables.length === 0 || !sfProjectId || !sfDsName) return;
     setBusy('sf-publish');
     setError(null);
     setNotice(null);
     try {
       const res = await api.salesforcePublish({
         credentials: { url: sfUrl, username: sfUsername, password: sfPassword, token: sfToken || undefined },
-        object: sfObject,
+        tables,
+        relationships,
+        mode,
         projectId: sfProjectId,
         datasourceName: sfDsName,
         overwrite: sfOverwrite,
@@ -155,7 +182,6 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
       setSfUsername('');
       setSfPassword('');
       setSfToken('');
-      setSfObject('');
       setSfDsName('');
       setSfProjectId('');
       setSfOverwrite(false);
@@ -251,8 +277,6 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                     setPassword={setSfPassword}
                     token={sfToken}
                     setToken={setSfToken}
-                    object={sfObject}
-                    setObject={setSfObject}
                     projects={projects}
                     projectId={sfProjectId}
                     setProjectId={setSfProjectId}
@@ -332,6 +356,27 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
  * Cloud. On publish the parent locks the new datasource and the normal dashboard flow
  * proceeds unchanged.
  */
+/** A table row in the relationship builder. Index 0 is the primary object; each later
+ * row carries the relationship (`rel`) that connects it to a prior table. */
+interface TableDraft {
+  object: string;
+  rel?: { leftObject: string; leftField: string; rightField: string; cardinality: SfCardinality; joinType: SfJoinType };
+}
+
+const CARDINALITY_OPTIONS: Array<{ value: SfCardinality; label: string }> = [
+  { value: 'many-to-many', label: 'Many-to-many (neither unique)' },
+  { value: 'many-to-one', label: 'Many-to-one (right side unique)' },
+  { value: 'one-to-many', label: 'One-to-many (left side unique)' },
+  { value: 'one-to-one', label: 'One-to-one (both unique)' },
+];
+
+const JOIN_TYPE_OPTIONS: Array<{ value: SfJoinType; label: string }> = [
+  { value: 'left', label: 'Left' },
+  { value: 'right', label: 'Right' },
+  { value: 'inner', label: 'Inner' },
+  { value: 'full', label: 'Full Outer' },
+];
+
 function SalesforceBuild({
   busy,
   url,
@@ -342,8 +387,6 @@ function SalesforceBuild({
   setPassword,
   token,
   setToken,
-  object,
-  setObject,
   projects,
   projectId,
   setProjectId,
@@ -364,8 +407,6 @@ function SalesforceBuild({
   setPassword: (v: string) => void;
   token: string;
   setToken: (v: string) => void;
-  object: string;
-  setObject: (v: string) => void;
   projects: NamedItem[];
   projectId: string;
   setProjectId: (v: string) => void;
@@ -375,84 +416,404 @@ function SalesforceBuild({
   setOverwrite: (v: boolean) => void;
   serverCustom: boolean;
   setServerCustom: (v: boolean) => void;
-  onPublish: () => void;
+  onPublish: (tables: string[], relationships: SfRelationship[], mode: SfMode) => void;
 }): React.ReactElement {
-  const ready = Boolean(url && username && password && object && projectId && dsName);
+  // Connecting establishes the transient Salesforce session used to list objects and
+  // describe fields for the join-field dropdowns. Publishing re-logs in server-side.
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [objects, setObjects] = useState<Array<{ name: string; label: string }>>([]);
+  const connected = objects.length > 0;
+
+  const [relEnabled, setRelEnabled] = useState(false);
+  // Multi-object data-modeling mode: Tableau relationships (default) vs a physical join.
+  const [mode, setMode] = useState<SfMode>('relationship');
+  const [tables, setTables] = useState<TableDraft[]>([{ object: '' }]);
+  const [fieldsByObject, setFieldsByObject] = useState<Record<string, SfFieldInfo[]>>({});
+  const [describing, setDescribing] = useState<Record<string, boolean>>({});
+
+  async function connectSf(): Promise<void> {
+    if (!url || !username || !password) return;
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const res = await api.salesforceConnect({ url, username, password, token: token || undefined });
+      setObjects(res.tables);
+    } catch (e) {
+      setConnectError(e instanceof Error ? e.message : 'Could not connect to Salesforce.');
+      setObjects([]);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function loadFields(object: string): Promise<void> {
+    const name = object.trim();
+    if (!name || fieldsByObject[name] || describing[name]) return;
+    setDescribing((p) => ({ ...p, [name]: true }));
+    try {
+      const res = await api.salesforceDescribe(name);
+      setFieldsByObject((p) => ({ ...p, [name]: res.fields }));
+    } catch {
+      setFieldsByObject((p) => ({ ...p, [name]: [] }));
+    } finally {
+      setDescribing((p) => ({ ...p, [name]: false }));
+    }
+  }
+
+  function setPrimaryObject(value: string): void {
+    setTables((prev) => [{ ...prev[0], object: value }, ...prev.slice(1)]);
+    void loadFields(value);
+  }
+
+  function toggleRelationships(enabled: boolean): void {
+    setRelEnabled(enabled);
+    if (!enabled) setTables((prev) => prev.slice(0, 1)); // collapse back to the primary object
+  }
+
+  function addTable(): void {
+    setTables((prev) => {
+      const priorObject = prev[0]?.object ?? '';
+      return [
+        ...prev,
+        {
+          object: '',
+          rel: { leftObject: priorObject, leftField: '', rightField: '', cardinality: 'many-to-many', joinType: 'left' },
+        },
+      ];
+    });
+  }
+
+  function removeTable(index: number): void {
+    setTables((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function setTableObject(index: number, value: string): void {
+    setTables((prev) => prev.map((t, i) => (i === index ? { ...t, object: value } : t)));
+    void loadFields(value);
+  }
+
+  function updateRel(index: number, patch: Partial<NonNullable<TableDraft['rel']>>): void {
+    setTables((prev) =>
+      prev.map((t, i) =>
+        i === index && t.rel ? { ...t, rel: { ...t.rel, ...patch } } : t,
+      ),
+    );
+    if (patch.leftObject) void loadFields(patch.leftObject);
+  }
+
+  const visibleTables = relEnabled ? tables : tables.slice(0, 1);
+  const selectedObjects = visibleTables.map((t) => t.object.trim());
+  const allHaveObject = selectedObjects.every((o) => o.length > 0);
+  const hasDupes = new Set(selectedObjects).size !== selectedObjects.length;
+  const relsComplete =
+    !relEnabled ||
+    tables.slice(1).every((t) => t.rel && t.rel.leftObject && t.rel.leftField && t.rel.rightField && t.object.trim());
+  const enoughTables = !relEnabled || tables.length >= 2;
+  const modelDone = Boolean(connected && allHaveObject && !hasDupes && relsComplete && enoughTables);
+  const ready = Boolean(modelDone && projectId && dsName);
+
+  function submit(): void {
+    if (!ready) return;
+    const relationships: SfRelationship[] = relEnabled
+      ? tables
+          .slice(1)
+          .filter((t) => t.object.trim() && t.rel)
+          .map((t) => ({
+            leftObject: t.rel!.leftObject,
+            leftField: t.rel!.leftField,
+            rightObject: t.object.trim(),
+            rightField: t.rel!.rightField,
+            cardinality: t.rel!.cardinality,
+            joinType: t.rel!.joinType,
+          }))
+      : [];
+    // Single-object builds have no data-modeling mode; default to 'relationship'.
+    onPublish(selectedObjects, relationships, relEnabled ? mode : 'relationship');
+  }
+
+  const ObjectSelect = ({ value, onChange }: { value: string; onChange: (v: string) => void }): React.ReactElement => (
+    <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Select an object…</option>
+      {objects.map((o) => (
+        <option key={o.name} value={o.name}>
+          {o.label === o.name ? o.name : `${o.label} (${o.name})`}
+        </option>
+      ))}
+    </select>
+  );
+
+  const FieldSelect = ({
+    object,
+    value,
+    onChange,
+  }: {
+    object: string;
+    value: string;
+    onChange: (v: string) => void;
+  }): React.ReactElement => {
+    const fields = fieldsByObject[object.trim()] ?? [];
+    return (
+      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={!object || describing[object.trim()]}>
+        <option value="">{describing[object.trim()] ? 'Loading fields…' : 'Select a field…'}</option>
+        {fields.map((f) => (
+          <option key={f.name} value={f.name}>
+            {f.label === f.name ? f.name : `${f.label} (${f.name})`}
+          </option>
+        ))}
+      </select>
+    );
+  };
+
   return (
-    <div className="col" style={{ gap: 8 }}>
-      <div className="small muted">Connector: Salesforce</div>
-      <div className="small muted">
-        Your Salesforce credentials are used <strong>only to read the object's fields</strong> — they are not embedded.
-        The published datasource connects via your <strong>saved Salesforce credential</strong> on Tableau Cloud (save it
-        once under Tableau Cloud → Account Settings → Saved Credentials).
+    <div className="sf">
+      <div className="sf-head">
+        <div className="sf-logo">SF</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="t">Salesforce data source</div>
+          <div className="s">Connect, model your objects, then publish an extract to Tableau Cloud.</div>
+        </div>
       </div>
 
-      <div className="col" style={{ gap: 6 }}>
+      <div className="sf-steps">
+        <div className={`st ${connected ? 'done' : 'active'}`}>
+          <span className="n">{connected ? '✓' : '1'}</span> Connect
+        </div>
+        <span className="sep" />
+        <div className={`st ${modelDone ? 'done' : connected ? 'active' : ''}`}>
+          <span className="n">{modelDone ? '✓' : '2'}</span> Model
+        </div>
+        <span className="sep" />
+        <div className={`st ${ready ? 'active' : ''}`}>
+          <span className="n">3</span> Publish
+        </div>
+      </div>
+
+      {/* Step 1 — Connect */}
+      <div className="sf-section">
+        <div className="h">
+          <span className="dot" />
+          <span className="tt">Connect to Salesforce</span>
+          {connected ? (
+            <span className="badge ok small" style={{ marginLeft: 'auto' }}>
+              Connected · {objects.length} objects
+            </span>
+          ) : null}
+        </div>
+        <div className="sf-note" style={{ marginBottom: 10 }}>
+          Your credentials are used <strong>only to read object fields</strong> — they are never embedded. The published
+          datasource connects via your <strong>saved Salesforce credential</strong> on Tableau Cloud (Account Settings →
+          Saved Credentials).
+        </div>
+        <div className="sf-grid">
+          <div className="full">
+            <label>Salesforce login URL</label>
+            <input placeholder="https://login.salesforce.com" value={url} onChange={(e) => setUrl(e.target.value)} />
+          </div>
+          <div className="full">
+            <label>Username</label>
+            <input
+              placeholder="jane.doe@example.com"
+              autoComplete="off"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+            />
+          </div>
+          <div>
+            <label>Password</label>
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <div>
+            <label>
+              Security token <span className="muted">(optional)</span>
+            </label>
+            <input
+              type="password"
+              autoComplete="new-password"
+              placeholder="If your org requires it"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 12 }}>
+          <button
+            className={connected ? 'secondary' : ''}
+            onClick={connectSf}
+            disabled={!url || !username || !password || connecting}
+          >
+            {connecting ? <Busy label="Connecting…" /> : connected ? 'Reconnect' : 'Connect to Salesforce'}
+          </button>
+          {!connected && !connectError ? (
+            <span className="small muted">Loads your objects and their fields for modeling.</span>
+          ) : null}
+        </div>
+        {connectError ? (
+          <div className="warnbox small" style={{ marginTop: 10 }}>
+            {connectError}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Step 2 — Model */}
+      <div className={`sf-section ${connected ? '' : 'disabled'}`}>
+        <div className="h">
+          <span className="dot" />
+          <span className="tt">Model your data</span>
+        </div>
+
         <div>
-          <label>Salesforce login URL</label>
+          <label>{relEnabled ? 'Primary object (Table 1)' : 'Salesforce object'}</label>
+          <ObjectSelect value={tables[0]?.object ?? ''} onChange={setPrimaryObject} />
+        </div>
+
+        <label className="switch" style={{ marginTop: 14 }}>
           <input
-            placeholder="e.g. https://login.salesforce.com"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
+            type="checkbox"
+            checked={relEnabled}
+            onChange={(e) => toggleRelationships(e.target.checked)}
+            disabled={!tables[0]?.object}
           />
+          <span className="track" />
+          <span>Combine multiple objects (data modeling)</span>
+        </label>
+
+        {relEnabled ? (
+          <div className="col" style={{ gap: 12, marginTop: 14 }}>
+            <div>
+              <label>Model type</label>
+              <div className="segmented">
+                <button type="button" className={mode === 'relationship' ? 'on' : ''} onClick={() => setMode('relationship')}>
+                  Relationship
+                </button>
+                <button type="button" className={mode === 'join' ? 'on' : ''} onClick={() => setMode('join')}>
+                  Join
+                </button>
+              </div>
+              <div className="hint">
+                {mode === 'relationship'
+                  ? 'Recommended. Objects stay separate and are related by cardinality; Tableau chooses the join at query time.'
+                  : 'Objects are flattened into one table using the chosen SQL join type.'}
+              </div>
+            </div>
+
+            {tables.slice(1).map((t, idx) => {
+              const i = idx + 1; // index in `tables`
+              const priorObjects = tables.slice(0, i).map((p) => p.object.trim()).filter(Boolean);
+              const leftObject = t.rel?.leftObject ?? '';
+              return (
+                <div key={i} className="tablecard">
+                  <div className="th">
+                    <span className="lbl">
+                      <span className="num">{i + 1}</span> Table {i + 1}
+                    </span>
+                    <button type="button" className="linkbtn" onClick={() => removeTable(i)}>
+                      Remove
+                    </button>
+                  </div>
+                  <div>
+                    <label>Object</label>
+                    <ObjectSelect value={t.object} onChange={(v) => setTableObject(i, v)} />
+                  </div>
+                  <label style={{ marginTop: 10 }}>{mode === 'join' ? 'Join condition' : 'Relationship condition'}</label>
+                  <div className="joinrow">
+                    <select value={leftObject} onChange={(e) => updateRel(i, { leftObject: e.target.value, leftField: '' })}>
+                      <option value="">{mode === 'join' ? 'Join to…' : 'Relate to…'}</option>
+                      {priorObjects.map((o) => (
+                        <option key={o} value={o}>
+                          {o}
+                        </option>
+                      ))}
+                    </select>
+                    <FieldSelect object={leftObject} value={t.rel?.leftField ?? ''} onChange={(v) => updateRel(i, { leftField: v })} />
+                    <span className="eq">=</span>
+                    <FieldSelect object={t.object} value={t.rel?.rightField ?? ''} onChange={(v) => updateRel(i, { rightField: v })} />
+                  </div>
+                  <div style={{ marginTop: 10 }}>
+                    {mode === 'join' ? (
+                      <>
+                        <label>Join type</label>
+                        <select
+                          value={t.rel?.joinType ?? 'left'}
+                          onChange={(e) => updateRel(i, { joinType: e.target.value as SfJoinType })}
+                        >
+                          {JOIN_TYPE_OPTIONS.map((j) => (
+                            <option key={j.value} value={j.value}>
+                              {j.label}
+                            </option>
+                          ))}
+                        </select>
+                      </>
+                    ) : (
+                      <>
+                        <label>Cardinality</label>
+                        <select
+                          value={t.rel?.cardinality ?? 'many-to-many'}
+                          onChange={(e) => updateRel(i, { cardinality: e.target.value as SfCardinality })}
+                        >
+                          {CARDINALITY_OPTIONS.map((c) => (
+                            <option key={c.value} value={c.value}>
+                              {c.label}
+                            </option>
+                          ))}
+                        </select>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <button type="button" className="addbtn" onClick={addTable} disabled={!tables[0]?.object}>
+              + Add table
+            </button>
+            {hasDupes ? <div className="warnbox small">Each object can be added only once.</div> : null}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Step 3 — Publish */}
+      <div className={`sf-section ${connected ? '' : 'disabled'}`}>
+        <div className="h">
+          <span className="dot" />
+          <span className="tt">Publish to Tableau Cloud</span>
         </div>
-        <div>
-          <label>Salesforce username</label>
-          <input
-            placeholder="e.g. jane.doe@example.com"
-            autoComplete="off"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-          />
+        <div className="sf-grid">
+          <div className="full">
+            <label>Project / folder</label>
+            <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
+              <option value="">Select a project…</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="full">
+            <label>Datasource name</label>
+            <input placeholder="e.g. Salesforce Account DS" value={dsName} onChange={(e) => setDsName(e.target.value)} />
+          </div>
         </div>
-        <div>
-          <label>Salesforce password</label>
-          <input
-            type="password"
-            autoComplete="new-password"
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-        </div>
-        <div>
-          <label>Security token (optional)</label>
-          <input
-            type="password"
-            autoComplete="new-password"
-            placeholder="Appended to password if your org requires it"
-            value={token}
-            onChange={(e) => setToken(e.target.value)}
-          />
-        </div>
-        <div>
-          <label>Salesforce object (SObject API name)</label>
-          <input placeholder="e.g. Account" value={object} onChange={(e) => setObject(e.target.value)} />
-        </div>
-        <div>
-          <label>Publish to project/folder</label>
-          <select value={projectId} onChange={(e) => setProjectId(e.target.value)}>
-            <option value="">Select a project…</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label>New datasource name</label>
-          <input placeholder="e.g. Salesforce Account DS" value={dsName} onChange={(e) => setDsName(e.target.value)} />
-        </div>
-        <label className="small" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <label className="checkline" style={{ marginTop: 12 }}>
           <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
-          Overwrite if a datasource with this name already exists
+          <span>Overwrite if a datasource with this name already exists</span>
         </label>
-        <label className="small" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <label className="checkline" style={{ marginTop: 10 }}>
           <input type="checkbox" checked={serverCustom} onChange={(e) => setServerCustom(e.target.checked)} />
-          Use a custom Salesforce OAuth client on the site (server-custom) — matches the reference
+          <span>Use my organization's Salesforce OAuth client (configured on Tableau Cloud)</span>
         </label>
-        <button onClick={onPublish} disabled={!ready || busy === 'sf-publish'}>
+        <div className="sf-note" style={{ marginTop: 8 }}>
+          When enabled, the datasource authenticates with the custom Salesforce OAuth client a Tableau admin registered on
+          your Tableau Cloud site (Settings → Connected Apps / OAuth Clients). Uncheck to use Tableau's built-in Salesforce
+          OAuth client. This is not the same as embedding a password.
+        </div>
+        <button style={{ marginTop: 14, width: '100%' }} onClick={submit} disabled={!ready || busy === 'sf-publish'}>
           {busy === 'sf-publish' ? <Busy label="Publishing…" /> : 'Create & publish datasource'}
         </button>
       </div>
