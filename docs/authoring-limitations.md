@@ -55,6 +55,23 @@ joins). Honest boundaries:
 - Credentials are never embedded in the extract; refreshability relies on the saved
   Salesforce credential on Tableau Cloud.
 
+## Excel extract datasources — honest scope
+
+The Excel connector publishes an **extract-only** datasource built from an uploaded
+workbook at publish time (all selected sheets, with relationships or physical joins).
+Honest boundaries:
+
+- **Static extract — no refresh.** There is no live connection and no embedded credential,
+  so the datasource cannot be refreshed on Tableau Cloud. The bundled `.hyper` IS the data;
+  to update it, re-upload and re-publish.
+- **Row caps.** Each sheet is capped (`HYPER_MAX_ROWS`); large sheets are truncated.
+- **Type inference is best-effort.** Column types are inferred by sampling non-empty cells
+  (number → integer/real, Date → date/datetime, boolean, else text); mixed-type columns
+  fall back to text. There is no per-column type override.
+- **Name sanitization.** Sheet and column names are sanitized to identifier-safe ids
+  (`[A-Za-z][A-Za-z0-9_]*`) so they flow through the shared `.tds`/`.hyper` pipeline; the
+  original names are preserved as captions/labels for display.
+
 ## The honest hand-off
 
 For anything in Category C, TableauPilot:

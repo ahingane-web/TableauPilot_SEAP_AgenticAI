@@ -17,6 +17,7 @@ every capability to one of five buckets.
 | Human authoring in the real embed | User interacts with Tableau UI | ✅ Category B |
 | **Build a Salesforce extract datasource** | Local `.hyper` + `.tds` → REST publish `.tdsx` | ✅ Category A-gen |
 | Model Salesforce objects (relationships / physical joins) | Deterministic `.tds` generation | ✅ Category A-gen |
+| **Build an Excel extract-only datasource** | `exceljs` parse → local `.hyper` + `excel-direct` `.tds` → REST publish `.tdsx` (no credential/refresh) | ✅ Category A-gen |
 | Embed saved credential on a datasource connection | REST Update-Connection (`embedPassword`) | ✅ Category A |
 | Refresh a published extract | REST `POST /datasources/{id}/refresh` | ✅ Category A |
 | Server-side extract creation from a live datasource | `createExtract` background job | ❌ unsupported on target site (see below) |
@@ -48,6 +49,23 @@ for the relationships model — `ObjectModelRelationshipPerfOptions`). Omitting 
 load the extract in **legacy** mode and flatten the multi-table `<object-graph>` into a single
 **"Migrated Data"** table (so a "relationship" build renders as one merged table). Both working
 references carry this block; the generators now emit it for every mode.
+
+## Category A-gen — Compile an Excel workbook into an extract-only datasource
+
+The Excel connector parses an uploaded `.xlsx` (`exceljs`), treats each **sheet** like a
+Salesforce object, and compiles the SAME `.tds` shapes (single / relationships object-graph /
+physical join) + a locally-materialized `.hyper` `.tdsx` — the only structural difference is a
+`class='excel-direct'` named-connection (with the uploaded `filename`) and `table='[<sheet>$]'`
+relations, reconciled against `reference/sample ds Excel Connector.tds`. The same object-model
+manifest requirement applies.
+
+**Extract-only publish.** Unlike Salesforce, an Excel datasource is published with **no
+`connectionCredentials`** and **no refresh** — the bundled `.hyper` IS the data (equivalent to
+Tableau's "include external files → extract"). The `excel-direct` `filename` is retained only
+for lineage and is never read on Tableau Cloud; the datasource is viewable immediately and is not
+refreshable without re-publishing. This reuses `publishDatasource` (which already makes
+`connectionCredentials` optional), skipping `embedDatasourceConnectionCredential`/
+`refreshDatasourceNow`.
 
 **Why build the `.hyper` locally?** Server-side extract creation from a live datasource
 was tried and failed on the target Cloud site — `createExtract` returns *"REST API does

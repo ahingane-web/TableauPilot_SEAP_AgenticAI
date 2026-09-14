@@ -3,6 +3,58 @@
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
 > Newest entries at the top of the change log. Last updated: 2026-09-14.
 
+## Feature: Excel connector (Build datasource) (newest first)
+
+- **2026-09-14 — Completed Excel docs coverage.** Filled the docs that previously had no
+  Excel mention: [security.md](./security.md) (in-memory parse, no credentials, extract-only,
+  sidecar hygiene), [authentication.md](./authentication.md) §5 (no sign-in),
+  [authoring-limitations.md](./authoring-limitations.md) (static extract / row caps / type
+  inference / name sanitization honest scope), and
+  [python-dependency-decision.md](./python-dependency-decision.md) (the Hyper sidecar now
+  serves both Salesforce and Excel; Excel is extract-only). Docs-only; no code changed.
+
+- **2026-09-14 — Added Excel as a second "Build datasource" connector.** Flow:
+  `Build datasource > pick connector > Excel > upload .xlsx > select sheet(s) > Relationship or
+  Join > publish`. Sheets play the exact role Salesforce objects play, and the modeling +
+  extract + publish pipeline is REUSED. Published **extract-only** (the bundled `.hyper` is the
+  data; no live credential, no server-side refresh). **No Salesforce datasource logic changed.**
+  - **Parsing:** [src/excel/excelClient.ts](../src/excel/excelClient.ts) (`exceljs`) →
+    `parseWorkbook(buffer, {maxRows})` returns typed, **identifier-safe** sheets (sheet/column
+    names sanitized to `[A-Za-z][A-Za-z0-9_]*`, originals kept as `caption`/`label`), per-column
+    type inference (number→int/double, Date→date/timestamp, bool→bool, else text), rows coerced
+    (dates→ISO) and capped at `hyper.maxRows`. Real Excel already forbids `: / [ ] * ? \` in
+    sheet names, so the sanitized ids flow cleanly through the Hyper `--table` arg + `.tds`
+    brackets.
+  - **TDS:** [src/tableau/authoring/excelTdsGenerator.ts](../src/tableau/authoring/excelTdsGenerator.ts)
+    mirrors the three Salesforce generators but emits a `class='excel-direct'` named-connection
+    (with the uploaded `filename`) and `[<sheet>$]` relations, reconciled against
+    `reference/sample ds Excel Connector.tds`. It **reuses** the now-exported connection-agnostic
+    helpers from `tdsGenerator.ts` (manifest, cols map, metadata-records, columns, extract,
+    object id) by adapting Excel columns to the Salesforce column spec via a synthetic type token
+    — so the two connectors stay byte-for-byte in lock-step except for the connection/relation
+    lines. Salesforce fields see only additive `export`s (no behavior change).
+  - **Orchestration:** [src/tableau/index.ts](../src/tableau/index.ts) adds
+    `excelStoreUpload` (parse + stash transient `session.connectors.excel`) and
+    `excelBuildAndPublishDatasource` (build TDS + `.hyper` via the SAME `buildExtractTdsx`,
+    `publishDatasource` with **no `connectionCredentials`** and **no** embed/refresh, then lock +
+    write `connectorMetadata` via `excelSheetsToMetadata`, qualified `SheetId.Field` for multi).
+  - **Routes:** `POST /api/connectors/excel/upload` (multipart, `.xlsx`/`.xlsm`, ≤25 MB) and
+    `POST /api/connectors/excel/publish` (`ExcelBuildSchema`). **Client:** `api.excelUpload`
+    (FormData) + `api.excelPublish`.
+  - **UI:** extracted the shared modeling step into
+    [app/components/DataModelBuilder.tsx](../app/components/DataModelBuilder.tsx) (used by BOTH
+    connectors — Salesforce behavior preserved), added
+    [app/components/ExcelBuild.tsx](../app/components/ExcelBuild.tsx) and a connector dropdown in
+    `SetupPanel` build mode.
+  - **Verified:** end-to-end smoke (xlsx → parse → relationships `.tds` → real `.hyper` → `.tdsx`
+    with both files bundled) succeeds; `tsc`/lint clean.
+  - **Known trade-off:** field/sheet display names are the identifier-safe forms (e.g.
+    `Order ID` → `Order_ID`); originals are kept as captions but not yet emitted into the `.tds`.
+  - **Tests:** [tests/unit/excelTdsGenerator.test.ts](../tests/unit/excelTdsGenerator.test.ts)
+    (manifest, `excel-direct`, `[Sheet$]`, extract over `[Extract].[Sheet]`, object-graph/join)
+    + [tests/unit/excelClient.test.ts](../tests/unit/excelClient.test.ts) (round-trip parse,
+    sanitization, type inference, row cap) — **+17 cases**.
+
 ## Environment facts
 
 - **OS:** macOS (darwin). **Runtime:** Node ≥ 20.9, TypeScript, ESM.
@@ -23,7 +75,9 @@
   below). Code path is complete; Tableau Cloud rejects the generated workbook.
 - Phase 15 (Salesforce connector datasource builder): ✅ build + publish work; see the
   newest entry below.
-- Tests: **193 unit/integration passing**; `tsc`/lint/build clean.
+- Phase 16 (Excel connector datasource builder): ✅ extract-only build + publish; shares the
+  Salesforce modeling/extract pipeline. See the newest entry below.
+- Tests: **210 unit/integration passing**; `tsc`/lint/build clean.
 
 ## Fix: relationship datasource showed "Migrated Data" (newest first)
 

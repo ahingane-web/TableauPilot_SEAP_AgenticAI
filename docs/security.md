@@ -66,6 +66,22 @@
   paths** on argv — never row data or secrets — so nothing sensitive appears in the
   process table; the temp directory is always removed (even on failure).
 
+## Excel connector
+
+- **No credentials at all.** The Excel connector authenticates to **nothing** — it only
+  parses an uploaded workbook. There is no external system to sign in to, so no secret is
+  ever collected, held, or embedded.
+- **In-memory parse.** The uploaded `.xlsx` bytes are parsed **in memory** by
+  `exceljs` (`src/excel/excelClient.ts` `parseWorkbook(buffer)`); the raw upload is never
+  written to disk. The typed, identifier-safe sheets + rows are held transiently on
+  `session.connectors.excel` and **cleared once publishing completes** (`session.connectors
+  = undefined`), never persisted to the vault and never sent to the LLM.
+- **Extract-only, nothing embedded.** The published `.hyper`/`.tds` contains **no**
+  connection credential; the bundled extract IS the data (viewable immediately, no
+  server-side refresh). There is no live connection to authenticate.
+- **Same sidecar hygiene.** Extract packaging reuses `hyperPackager.ts`, so the sidecar
+  still receives only **temp-file paths** on argv and the temp directory is always removed.
+
 ## Operational guidance
 
 - Set a strong, unique `VAULT_PEPPER`; rotating it invalidates all vaults (by design).

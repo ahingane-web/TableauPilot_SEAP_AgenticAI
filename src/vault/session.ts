@@ -12,6 +12,7 @@ import { getConfig } from '../config/env.js';
 import type { DatasourceLock, TableauProjectContext } from '../schemas/common.js';
 import type { DashboardPlan } from '../schemas/dashboardPlan.js';
 import type { SalesforceCredentials, SalesforceSession, SalesforceTable } from '../salesforce/client.js';
+import type { ExcelSheet } from '../excel/excelClient.js';
 import { sweepPendingOauth } from '../salesforce/oauthStore.js';
 import type { DatasourceMetadata } from '../tableau/types.js';
 import type { TableauCredentials } from './types.js';
@@ -29,6 +30,20 @@ export interface ConnectorState {
     sfSession: SalesforceSession;
     /** Objects listed for the user to choose from. */
     tables: SalesforceTable[];
+  };
+  /**
+   * Transient Excel upload state for the "Build datasource" flow. The uploaded workbook is
+   * parsed once (sheets + schema + rows) and held here — memory only — until the datasource
+   * is published (or the session is cleared). Non-secret, but never sent wholesale to the
+   * client (only sheet/column identity is exposed).
+   */
+  excel?: {
+    /** Opaque id for the current upload (lets the client confirm which workbook is active). */
+    uploadId: string;
+    /** Original uploaded file name (basename) — used for the `excel-direct` `filename`. */
+    filename: string;
+    /** Parsed worksheets: identifier-safe id + caption + typed columns + coerced rows. */
+    sheets: ExcelSheet[];
   };
 }
 

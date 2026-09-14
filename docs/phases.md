@@ -85,7 +85,7 @@ publish events captured.
 ## Phase 14 — Testing ✅
 **Produces:** `tests/unit/*`, `tests/integration/*`, `tests/e2e/*`, fixtures.
 **Done when:** unit + integration (Vitest) and non-destructive E2E (Playwright) pass;
-`tsc`/lint/build clean. Current: **193 unit/integration passing**.
+`tsc`/lint/build clean. Current: **210 unit/integration passing**.
 
 ## Phase 15 — Salesforce connector: extract datasource builder ✅
 **Produces:** `src/salesforce/{client,oauth,oauthStore}.ts`,
@@ -96,11 +96,26 @@ routes, and the `SalesforceBuild` wizard in `app/components/SetupPanel.tsx`.
 **Done when:** connect (username/password or OAuth) → model one/many objects
 (relationship or physical-join) → generate `.tds` + local `.hyper`/`.tdsx` (Python Hyper
 sidecar) → publish → embed saved Salesforce credential → trigger extract refresh. Single-
-and multi-object builds work; **193 tests passing**; `tsc`/lint clean.
+and multi-object builds work; **210 tests passing**; `tsc`/lint clean.
 **Note:** the generated `.tds` must carry the object-model `<document-format-change-manifest>`
 or Tableau loads the extract in legacy mode and shows one "Migrated Data" table. Added
 2026-09-14 and **user-verified**: multi-object relationship builds now render the correct
 related tables. See the 2026-09-14 [memory.md](./memory.md) entry.
+
+## Phase 16 — Excel connector: extract-only datasource builder ✅
+**Produces:** `src/excel/excelClient.ts` (`exceljs` parse → identifier-safe typed sheets),
+`src/tableau/authoring/excelTdsGenerator.ts` (single / relationships / physical-join `.tds`
+with an `excel-direct` connection, reusing the exported `tdsGenerator.ts` helpers),
+`TableauService.{excelStoreUpload,excelBuildAndPublishDatasource}`,
+`/api/connectors/excel/{upload,publish}` routes, the shared
+`app/components/DataModelBuilder.tsx`, and `app/components/ExcelBuild.tsx` + a connector
+dropdown in `SetupPanel`.
+**Done when:** upload `.xlsx` → list sheets as "objects" → model one/many sheets
+(relationship or physical-join, identical UI to Salesforce) → generate `.tds` + local
+`.hyper`/`.tdsx` → publish **extract-only** (no embedded credential, no refresh) → lock +
+converge on the normal dashboard flow. Single- and multi-sheet builds work; **210 tests
+passing**; `tsc`/lint clean. **No Salesforce datasource logic changed** (only additive
+`export`s in `tdsGenerator.ts` and a shared-component extraction in `SetupPanel`).
 
 ---
 

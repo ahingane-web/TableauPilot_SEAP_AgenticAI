@@ -164,6 +164,57 @@ export const api = {
       }
     >('/api/connectors/salesforce/publish', { method: 'POST', body }),
 
+  // ---- Excel connector ----
+  // Upload a workbook (multipart). Returns the sheets + per-sheet column identity used by
+  // the same relationship/join builder Salesforce uses. Parsed rows stay server-side.
+  async excelUpload(file: File): Promise<{
+    uploadId: string;
+    filename: string;
+    sheets: Array<{
+      id: string;
+      caption: string;
+      rowCount: number;
+      fields: { name: string; label: string; type: string }[];
+    }>;
+  }> {
+    const form = new FormData();
+    form.append('file', file);
+    const headers: Record<string, string> = {};
+    const sid = getSessionId();
+    if (sid) headers['x-session-id'] = sid;
+    const res = await fetch('/api/connectors/excel/upload', { method: 'POST', headers, body: form });
+    const text = await res.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!res.ok) {
+      throw new ApiError((json.error as SanitizedError) ?? { code: 'INTERNAL', status: res.status, message: 'Upload failed.' });
+    }
+    return json;
+  },
+  // Build an Excel extract datasource (single sheet, or sheets joined via relationships).
+  // Published EXTRACT-ONLY (the bundled .hyper is the data; no live credential).
+  excelPublish: (body: {
+    /** One sheet id = single-table; multiple = relationships datasource. */
+    sheets: string[];
+    relationships?: Array<{
+      leftObject: string;
+      leftField: string;
+      rightObject: string;
+      rightField: string;
+      cardinality?: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+      joinType?: 'inner' | 'left' | 'right' | 'full';
+    }>;
+    mode?: 'relationship' | 'join';
+    projectId: string;
+    datasourceName: string;
+    overwrite?: boolean;
+  }) =>
+    req<
+      SessionContext & {
+        datasource: { id: string; name: string; projectName?: string };
+        extract: { state: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
+      }
+    >('/api/connectors/excel/publish', { method: 'POST', body }),
+
   plan: (request: string, workbookName?: string) =>
     req<PlanningResult>('/api/dashboard/plan', { method: 'POST', body: { request, workbookName } }),
   /** Chat: revise the current (unpublished) plan via a natural-language instruction. */

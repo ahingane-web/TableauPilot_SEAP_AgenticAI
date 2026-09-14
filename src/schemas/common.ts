@@ -264,6 +264,89 @@ export const SalesforceBuildSchema = z
   });
 export type SalesforceBuildInput = z.infer<typeof SalesforceBuildSchema>;
 
+/**
+ * An identifier-safe Excel sheet/field id. The Excel connector sanitizes every worksheet
+ * and column name to this grammar on upload (see `src/excel/excelClient.ts`) so they flow
+ * through the SAME deterministic `.tds`/`.hyper` pipeline as Salesforce objects/fields.
+ */
+export const ExcelIdentifierSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9_]*$/, 'Expected an identifier-safe Excel sheet/field id');
+
+/**
+ * Payload for building an Excel EXTRACT datasource from a previously uploaded workbook.
+ * `sheets` are identifier-safe sheet ids returned by the upload step. A single-sheet build
+ * sends `sheets: [id], relationships: []`; multi-sheet builds must provide relationships
+ * that connect every sheet into one graph — identical rules to {@link SalesforceBuildSchema},
+ * only the connector (and the absence of credentials) differ. Publishing is extract-only.
+ */
+export const ExcelBuildSchema = z
+  .object({
+    sheets: z.array(ExcelIdentifierSchema).min(1, 'Select at least one sheet'),
+    relationships: z.array(SalesforceRelationshipSchema).default([]),
+    mode: SalesforceBuildModeSchema.default('relationship'),
+    projectId: z.string().trim().min(1, 'Select a Tableau project/folder to publish into'),
+    datasourceName: z.string().trim().min(1, 'Provide a name for the new datasource'),
+    overwrite: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const sheets = val.sheets.map((s) => s.trim());
+    const unique = new Set(sheets);
+    if (unique.size !== sheets.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sheets'], message: 'Duplicate sheets are not allowed.' });
+    }
+    if (sheets.length === 1) {
+      if (val.relationships.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships'],
+          message: 'A single-sheet datasource cannot have relationships.',
+        });
+      }
+      return;
+    }
+    for (const [i, r] of val.relationships.entries()) {
+      if (!unique.has(r.leftObject.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'leftObject'],
+          message: `Relationship references "${r.leftObject}", which is not one of the selected sheets.`,
+        });
+      }
+      if (!unique.has(r.rightObject.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'rightObject'],
+          message: `Relationship references "${r.rightObject}", which is not one of the selected sheets.`,
+        });
+      }
+      if (r.leftObject.trim() === r.rightObject.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i],
+          message: 'A relationship must connect two different sheets.',
+        });
+      }
+    }
+    if (val.relationships.length < sheets.length - 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: `Need at least ${sheets.length - 1} relationship(s) to connect ${sheets.length} sheets.`,
+      });
+      return;
+    }
+    if (!isConnected(sheets, val.relationships)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: 'The relationships must connect every sheet into a single joined model.',
+      });
+    }
+  });
+export type ExcelBuildInput = z.infer<typeof ExcelBuildSchema>;
+
 /** Union-find connectivity check: do the relationship edges connect all tables? */
 function isConnected(tables: string[], relationships: Array<{ leftObject: string; rightObject: string }>): boolean {
   const parent = new Map<string, string>();

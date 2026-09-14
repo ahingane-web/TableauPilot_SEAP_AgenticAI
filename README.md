@@ -41,8 +41,8 @@ cp .env.example .env
 # edit .env — set VAULT_PEPPER (long random), LLM provider + key, Tableau API version
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # for VAULT_PEPPER
 
-# (optional) for the Salesforce extract-datasource builder — creates .venv-hyper with the
-# Tableau Hyper API (Python). Only needed if you use the Salesforce connector.
+# (optional) for the extract-datasource builders — creates .venv-hyper with the
+# Tableau Hyper API (Python). Needed for the Salesforce and Excel connectors.
 npm run setup:hyper
 ```
 
@@ -58,7 +58,7 @@ Key env vars (full list + comments in [.env.example](./.env.example)):
 | `VAULT_PEPPER` | **required** server-only pepper for the PIN KDF |
 | `DATA_PATH` | encrypted vault + storage dir (git-ignored) |
 | `API_PORT` / `WEB_PORT` / `CORS_ORIGINS` | app wiring |
-| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce connector only) |
+| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce + Excel connectors) |
 | `SALESFORCE_OAUTH_CLIENT_ID` / `SALESFORCE_OAUTH_CLIENT_SECRET` / `SALESFORCE_OAUTH_REDIRECT_URI` | Salesforce browser-OAuth (optional; username/password works without them) |
 
 Per-user **Tableau credentials are never in `.env`** — you enter them in the app and
@@ -105,6 +105,11 @@ npm start            # NODE_ENV=production; serves API and the built SPA
 (Hyper sidecar), published to your chosen project, and the saved Salesforce credential is
 embedded + an extract refresh is triggered.
 
+**Or build an Excel data source** — pick the **Excel** connector, upload an `.xlsx`, and its
+**sheets** appear as the objects for the same Relationship/Join modeling. Publish to your chosen
+project as an **extract-only** datasource — the workbook's data is bundled in a `.hyper` (no live
+file connection, no embedded credential, no refresh). Uses the same Hyper sidecar as Salesforce.
+
 **Interface** — a light, Tableau-themed two-pane layout: the AI workflow on the left and the
 read-only published dashboard on the right. Use **Hide/Show dashboard** in the top bar to
 collapse the preview and give the workflow full width, and the collapsible **Datasource
@@ -135,6 +140,7 @@ stay server-side.
 - `GET /api/embed/info`
 - `GET /api/connectors`, `POST /api/connectors/salesforce/{connect,describe,publish}`,
   `POST /api/connectors/salesforce/oauth/start`, `GET /api/connectors/salesforce/{tables,oauth/callback}`
+- `POST /api/connectors/excel/upload` (multipart `.xlsx`/`.xlsm`), `POST /api/connectors/excel/publish` (extract-only)
 
 ## Testing
 

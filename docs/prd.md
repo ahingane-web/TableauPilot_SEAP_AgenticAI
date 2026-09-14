@@ -1,7 +1,7 @@
 # PRD — TableauPilot AI
 
 > Living document. Update this whenever product scope, requirements, or success
-> criteria change. Last updated: 2026-09-13.
+> criteria change. Last updated: 2026-09-14.
 
 ## 1. Summary
 
@@ -76,6 +76,13 @@ join fields), then build and publish an **extract-backed** Tableau datasource. T
 extract is materialized locally and published; the saved Salesforce credential is embedded
 and an extract refresh is triggered so the datasource is refreshable on Cloud.
 
+**Alternate flow — Excel data source builder.** Pick the **Excel** connector, upload an
+`.xlsx`, and its **sheets** appear as the "objects" for the SAME modeling step (relationships
+or joins). The selected sheets are materialized into a `.hyper` and published **extract-only**
+(the bundled extract IS the data; no live file connection, no embedded credential, no refresh).
+Flow: `Build datasource > select connector > Excel > upload > select sheet(s) > Relationship
+or Join > publish`.
+
 ## 6. Functional requirements
 
 - **FR1 Vault.** Register/unlock with username + 6-digit PIN; AES-256-GCM at rest;
@@ -109,6 +116,12 @@ and an extract refresh is triggered so the datasource is refreshable on Cloud.
   project; embed the saved Salesforce credential and trigger an extract refresh.
   Salesforce credentials are used only to read schema/data and are never embedded in the
   extract; multi-object field names are qualified (`Object.Field`) to avoid collisions.
+- **FR14 Excel connector.** Select the Excel connector and upload an `.xlsx`/`.xlsm` (≤25 MB);
+  the server parses it (sheets + inferred column types), lists sheets as the "objects" for the
+  SAME relationship/join modeling used by Salesforce, then materializes a local `.hyper` + `.tds`
+  → `.tdsx` and publishes it **extract-only** (no connection credential, no refresh). Sheet and
+  column names are sanitized to identifier-safe ids; multi-sheet field names are qualified
+  (`Sheet.Field`). No Salesforce datasource logic is altered.
 
 ## 7. Non-functional requirements
 

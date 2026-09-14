@@ -2,12 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import type { DatasourceMetadataView, NamedItem, SessionContext } from '../types';
 import { Busy, ErrorPanel, Collapsible } from './common';
-
-/** Relationship cardinality options shown in the relationship builder. */
-type SfCardinality = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
-
-/** SQL join type options shown in the physical-join builder. */
-type SfJoinType = 'inner' | 'left' | 'right' | 'full';
+import { DataModelBuilder, type DataModel } from './DataModelBuilder';
+import { ExcelBuild } from './ExcelBuild';
 
 /** Multi-object data-modeling mode: Tableau relationships vs a physical join. */
 type SfMode = 'relationship' | 'join';
@@ -18,16 +14,12 @@ interface SfRelationship {
   leftField: string;
   rightObject: string;
   rightField: string;
-  cardinality: SfCardinality;
-  joinType: SfJoinType;
+  cardinality: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+  joinType: 'inner' | 'left' | 'right' | 'full';
 }
 
-/** A described Salesforce field (name/label/type), used for the join-field dropdowns. */
-interface SfFieldInfo {
-  name: string;
-  label: string;
-  type: string;
-}
+/** Which connector the "Build datasource" flow targets. */
+type Connector = 'salesforce' | 'excel';
 
 /**
  * Connect + select destination project + select and LOCK the datasource.
@@ -48,6 +40,8 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
   // new one from a connector (Salesforce). The build flow ends by locking the
   // freshly published datasource, so the downstream dashboard flow is unchanged.
   const [mode, setMode] = useState<'published' | 'build'>('published');
+  // Which connector the build flow targets (Salesforce or Excel).
+  const [connector, setConnector] = useState<Connector>('salesforce');
   // Build-datasource inputs. Salesforce credentials are used ONLY to read the object
   // schema (describe) so fields are available immediately; they are NOT embedded. The
   // published datasource connects via the user's SAVED Salesforce credential on Tableau.
@@ -123,6 +117,31 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
     }
   }
 
+  // After ANY connector publish + lock, refresh context and load the locked datasource's
+  // metadata for display (best-effort — metadata may lag indexing for a brand-new source).
+  async function loadLockedMetadataAndRefresh(): Promise<void> {
+    const c = await api.context();
+    if (c.datasourceLock) {
+      try {
+        const md = await api.metadata(c.datasourceLock.datasourceId, c.datasourceLock.datasourceName);
+        setMetadata(md);
+      } catch {
+        /* metadata may lag indexing for a brand-new datasource */
+      }
+    }
+    onChange(c);
+  }
+
+  // Success handler for the Excel build flow: surface the extract status, then refresh.
+  async function afterBuildPublished(res: {
+    datasource: { name: string };
+    extract?: { state?: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
+  }): Promise<void> {
+    const ex = res.extract;
+    setNotice(ex?.message ? `Published "${res.datasource.name}". ${ex.message}` : `Published "${res.datasource.name}".`);
+    await loadLockedMetadataAndRefresh();
+  }
+
   async function publishSalesforce(tables: string[], relationships: SfRelationship[], mode: SfMode): Promise<void> {
     if (!sfUrl || !sfUsername || !sfPassword || tables.length === 0 || !sfProjectId || !sfDsName) return;
     setBusy('sf-publish');
@@ -153,16 +172,7 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
         );
       }
       // Datasource is now published + locked; load its metadata for display.
-      const c = await api.context();
-      if (c.datasourceLock) {
-        try {
-          const md = await api.metadata(c.datasourceLock.datasourceId, c.datasourceLock.datasourceName);
-          setMetadata(md);
-        } catch {
-          /* metadata may lag indexing for a brand-new datasource */
-        }
-      }
-      onChange(c);
+      await loadLockedMetadataAndRefresh();
     } catch (err) {
       setError(err);
     } finally {
@@ -267,27 +277,42 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                     </button>
                   </div>
                 ) : (
-                  <SalesforceBuild
-                    busy={busy}
-                    url={sfUrl}
-                    setUrl={setSfUrl}
-                    username={sfUsername}
-                    setUsername={setSfUsername}
-                    password={sfPassword}
-                    setPassword={setSfPassword}
-                    token={sfToken}
-                    setToken={setSfToken}
-                    projects={projects}
-                    projectId={sfProjectId}
-                    setProjectId={setSfProjectId}
-                    dsName={sfDsName}
-                    setDsName={setSfDsName}
-                    overwrite={sfOverwrite}
-                    setOverwrite={setSfOverwrite}
-                    serverCustom={sfServerCustom}
-                    setServerCustom={setSfServerCustom}
-                    onPublish={publishSalesforce}
-                  />
+                  <>
+                    <div className="row" style={{ marginBottom: 10 }}>
+                      <div style={{ flex: 1 }}>
+                        <label className="small">Connector</label>
+                        <select value={connector} onChange={(e) => setConnector(e.target.value as Connector)} style={{ width: '100%' }}>
+                          <option value="salesforce">Salesforce</option>
+                          <option value="excel">Excel (.xlsx)</option>
+                        </select>
+                      </div>
+                    </div>
+                    {connector === 'salesforce' ? (
+                      <SalesforceBuild
+                        busy={busy}
+                        url={sfUrl}
+                        setUrl={setSfUrl}
+                        username={sfUsername}
+                        setUsername={setSfUsername}
+                        password={sfPassword}
+                        setPassword={setSfPassword}
+                        token={sfToken}
+                        setToken={setSfToken}
+                        projects={projects}
+                        projectId={sfProjectId}
+                        setProjectId={setSfProjectId}
+                        dsName={sfDsName}
+                        setDsName={setSfDsName}
+                        overwrite={sfOverwrite}
+                        setOverwrite={setSfOverwrite}
+                        serverCustom={sfServerCustom}
+                        setServerCustom={setSfServerCustom}
+                        onPublish={publishSalesforce}
+                      />
+                    ) : (
+                      <ExcelBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -360,27 +385,6 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
  * Cloud. On publish the parent locks the new datasource and the normal dashboard flow
  * proceeds unchanged.
  */
-/** A table row in the relationship builder. Index 0 is the primary object; each later
- * row carries the relationship (`rel`) that connects it to a prior table. */
-interface TableDraft {
-  object: string;
-  rel?: { leftObject: string; leftField: string; rightField: string; cardinality: SfCardinality; joinType: SfJoinType };
-}
-
-const CARDINALITY_OPTIONS: Array<{ value: SfCardinality; label: string }> = [
-  { value: 'many-to-many', label: 'Many-to-many (neither unique)' },
-  { value: 'many-to-one', label: 'Many-to-one (right side unique)' },
-  { value: 'one-to-many', label: 'One-to-many (left side unique)' },
-  { value: 'one-to-one', label: 'One-to-one (both unique)' },
-];
-
-const JOIN_TYPE_OPTIONS: Array<{ value: SfJoinType; label: string }> = [
-  { value: 'left', label: 'Left' },
-  { value: 'right', label: 'Right' },
-  { value: 'inner', label: 'Inner' },
-  { value: 'full', label: 'Full Outer' },
-];
-
 function SalesforceBuild({
   busy,
   url,
@@ -429,12 +433,9 @@ function SalesforceBuild({
   const [objects, setObjects] = useState<Array<{ name: string; label: string }>>([]);
   const connected = objects.length > 0;
 
-  const [relEnabled, setRelEnabled] = useState(false);
-  // Multi-object data-modeling mode: Tableau relationships (default) vs a physical join.
-  const [mode, setMode] = useState<SfMode>('relationship');
-  const [tables, setTables] = useState<TableDraft[]>([{ object: '' }]);
-  const [fieldsByObject, setFieldsByObject] = useState<Record<string, SfFieldInfo[]>>({});
-  const [describing, setDescribing] = useState<Record<string, boolean>>({});
+  // Modeling (primary + additional objects, relationships/join, mode) is owned by the shared
+  // DataModelBuilder; we only track the model it emits.
+  const [model, setModel] = useState<DataModel>({ objects: [], relationships: [], mode: 'relationship', valid: false });
 
   async function connectSf(): Promise<void> {
     if (!url || !username || !password) return;
@@ -451,123 +452,12 @@ function SalesforceBuild({
     }
   }
 
-  async function loadFields(object: string): Promise<void> {
-    const name = object.trim();
-    if (!name || fieldsByObject[name] || describing[name]) return;
-    setDescribing((p) => ({ ...p, [name]: true }));
-    try {
-      const res = await api.salesforceDescribe(name);
-      setFieldsByObject((p) => ({ ...p, [name]: res.fields }));
-    } catch {
-      setFieldsByObject((p) => ({ ...p, [name]: [] }));
-    } finally {
-      setDescribing((p) => ({ ...p, [name]: false }));
-    }
-  }
-
-  function setPrimaryObject(value: string): void {
-    setTables((prev) => [{ ...prev[0], object: value }, ...prev.slice(1)]);
-    void loadFields(value);
-  }
-
-  function toggleRelationships(enabled: boolean): void {
-    setRelEnabled(enabled);
-    if (!enabled) setTables((prev) => prev.slice(0, 1)); // collapse back to the primary object
-  }
-
-  function addTable(): void {
-    setTables((prev) => {
-      const priorObject = prev[0]?.object ?? '';
-      return [
-        ...prev,
-        {
-          object: '',
-          rel: { leftObject: priorObject, leftField: '', rightField: '', cardinality: 'many-to-many', joinType: 'left' },
-        },
-      ];
-    });
-  }
-
-  function removeTable(index: number): void {
-    setTables((prev) => prev.filter((_, i) => i !== index));
-  }
-
-  function setTableObject(index: number, value: string): void {
-    setTables((prev) => prev.map((t, i) => (i === index ? { ...t, object: value } : t)));
-    void loadFields(value);
-  }
-
-  function updateRel(index: number, patch: Partial<NonNullable<TableDraft['rel']>>): void {
-    setTables((prev) =>
-      prev.map((t, i) =>
-        i === index && t.rel ? { ...t, rel: { ...t.rel, ...patch } } : t,
-      ),
-    );
-    if (patch.leftObject) void loadFields(patch.leftObject);
-  }
-
-  const visibleTables = relEnabled ? tables : tables.slice(0, 1);
-  const selectedObjects = visibleTables.map((t) => t.object.trim());
-  const allHaveObject = selectedObjects.every((o) => o.length > 0);
-  const hasDupes = new Set(selectedObjects).size !== selectedObjects.length;
-  const relsComplete =
-    !relEnabled ||
-    tables.slice(1).every((t) => t.rel && t.rel.leftObject && t.rel.leftField && t.rel.rightField && t.object.trim());
-  const enoughTables = !relEnabled || tables.length >= 2;
-  const modelDone = Boolean(connected && allHaveObject && !hasDupes && relsComplete && enoughTables);
-  const ready = Boolean(modelDone && projectId && dsName);
+  const ready = Boolean(model.valid && projectId && dsName);
 
   function submit(): void {
     if (!ready) return;
-    const relationships: SfRelationship[] = relEnabled
-      ? tables
-          .slice(1)
-          .filter((t) => t.object.trim() && t.rel)
-          .map((t) => ({
-            leftObject: t.rel!.leftObject,
-            leftField: t.rel!.leftField,
-            rightObject: t.object.trim(),
-            rightField: t.rel!.rightField,
-            cardinality: t.rel!.cardinality,
-            joinType: t.rel!.joinType,
-          }))
-      : [];
-    // Single-object builds have no data-modeling mode; default to 'relationship'.
-    onPublish(selectedObjects, relationships, relEnabled ? mode : 'relationship');
+    onPublish(model.objects, model.relationships as SfRelationship[], model.mode as SfMode);
   }
-
-  const ObjectSelect = ({ value, onChange }: { value: string; onChange: (v: string) => void }): React.ReactElement => (
-    <select value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">Select an object…</option>
-      {objects.map((o) => (
-        <option key={o.name} value={o.name}>
-          {o.label === o.name ? o.name : `${o.label} (${o.name})`}
-        </option>
-      ))}
-    </select>
-  );
-
-  const FieldSelect = ({
-    object,
-    value,
-    onChange,
-  }: {
-    object: string;
-    value: string;
-    onChange: (v: string) => void;
-  }): React.ReactElement => {
-    const fields = fieldsByObject[object.trim()] ?? [];
-    return (
-      <select value={value} onChange={(e) => onChange(e.target.value)} disabled={!object || describing[object.trim()]}>
-        <option value="">{describing[object.trim()] ? 'Loading fields…' : 'Select a field…'}</option>
-        {fields.map((f) => (
-          <option key={f.name} value={f.name}>
-            {f.label === f.name ? f.name : `${f.label} (${f.name})`}
-          </option>
-        ))}
-      </select>
-    );
-  };
 
   return (
     <div className="sf">
@@ -584,8 +474,8 @@ function SalesforceBuild({
           <span className="n">{connected ? '✓' : '1'}</span> Connect
         </div>
         <span className="sep" />
-        <div className={`st ${modelDone ? 'done' : connected ? 'active' : ''}`}>
-          <span className="n">{modelDone ? '✓' : '2'}</span> Model
+        <div className={`st ${model.valid ? 'done' : connected ? 'active' : ''}`}>
+          <span className="n">{model.valid ? '✓' : '2'}</span> Model
         </div>
         <span className="sep" />
         <div className={`st ${ready ? 'active' : ''}`}>
@@ -665,121 +555,15 @@ function SalesforceBuild({
         ) : null}
       </div>
 
-      {/* Step 2 — Model */}
-      <div className={`sf-section ${connected ? '' : 'disabled'}`}>
-        <div className="h">
-          <span className="dot" />
-          <span className="tt">Model your data</span>
-        </div>
-
-        <div>
-          <label>{relEnabled ? 'Primary object (Table 1)' : 'Salesforce object'}</label>
-          <ObjectSelect value={tables[0]?.object ?? ''} onChange={setPrimaryObject} />
-        </div>
-
-        <label className="switch" style={{ marginTop: 14 }}>
-          <input
-            type="checkbox"
-            checked={relEnabled}
-            onChange={(e) => toggleRelationships(e.target.checked)}
-            disabled={!tables[0]?.object}
-          />
-          <span className="track" />
-          <span>Combine multiple objects (data modeling)</span>
-        </label>
-
-        {relEnabled ? (
-          <div className="col" style={{ gap: 12, marginTop: 14 }}>
-            <div>
-              <label>Model type</label>
-              <div className="segmented">
-                <button type="button" className={mode === 'relationship' ? 'on' : ''} onClick={() => setMode('relationship')}>
-                  Relationship
-                </button>
-                <button type="button" className={mode === 'join' ? 'on' : ''} onClick={() => setMode('join')}>
-                  Join
-                </button>
-              </div>
-              <div className="hint">
-                {mode === 'relationship'
-                  ? 'Recommended. Objects stay separate and are related by cardinality; Tableau chooses the join at query time.'
-                  : 'Objects are flattened into one table using the chosen SQL join type.'}
-              </div>
-            </div>
-
-            {tables.slice(1).map((t, idx) => {
-              const i = idx + 1; // index in `tables`
-              const priorObjects = tables.slice(0, i).map((p) => p.object.trim()).filter(Boolean);
-              const leftObject = t.rel?.leftObject ?? '';
-              return (
-                <div key={i} className="tablecard">
-                  <div className="th">
-                    <span className="lbl">
-                      <span className="num">{i + 1}</span> Table {i + 1}
-                    </span>
-                    <button type="button" className="linkbtn" onClick={() => removeTable(i)}>
-                      Remove
-                    </button>
-                  </div>
-                  <div>
-                    <label>Object</label>
-                    <ObjectSelect value={t.object} onChange={(v) => setTableObject(i, v)} />
-                  </div>
-                  <label style={{ marginTop: 10 }}>{mode === 'join' ? 'Join condition' : 'Relationship condition'}</label>
-                  <div className="joinrow">
-                    <select value={leftObject} onChange={(e) => updateRel(i, { leftObject: e.target.value, leftField: '' })}>
-                      <option value="">{mode === 'join' ? 'Join to…' : 'Relate to…'}</option>
-                      {priorObjects.map((o) => (
-                        <option key={o} value={o}>
-                          {o}
-                        </option>
-                      ))}
-                    </select>
-                    <FieldSelect object={leftObject} value={t.rel?.leftField ?? ''} onChange={(v) => updateRel(i, { leftField: v })} />
-                    <span className="eq">=</span>
-                    <FieldSelect object={t.object} value={t.rel?.rightField ?? ''} onChange={(v) => updateRel(i, { rightField: v })} />
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    {mode === 'join' ? (
-                      <>
-                        <label>Join type</label>
-                        <select
-                          value={t.rel?.joinType ?? 'left'}
-                          onChange={(e) => updateRel(i, { joinType: e.target.value as SfJoinType })}
-                        >
-                          {JOIN_TYPE_OPTIONS.map((j) => (
-                            <option key={j.value} value={j.value}>
-                              {j.label}
-                            </option>
-                          ))}
-                        </select>
-                      </>
-                    ) : (
-                      <>
-                        <label>Cardinality</label>
-                        <select
-                          value={t.rel?.cardinality ?? 'many-to-many'}
-                          onChange={(e) => updateRel(i, { cardinality: e.target.value as SfCardinality })}
-                        >
-                          {CARDINALITY_OPTIONS.map((c) => (
-                            <option key={c.value} value={c.value}>
-                              {c.label}
-                            </option>
-                          ))}
-                        </select>
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-            <button type="button" className="addbtn" onClick={addTable} disabled={!tables[0]?.object}>
-              + Add table
-            </button>
-            {hasDupes ? <div className="warnbox small">Each object can be added only once.</div> : null}
-          </div>
-        ) : null}
-      </div>
+      {/* Step 2 — Model (shared with the Excel connector) */}
+      <DataModelBuilder
+        objects={objects}
+        describe={(name) => api.salesforceDescribe(name).then((r) => r.fields)}
+        onChange={setModel}
+        disabled={!connected}
+        noun="object"
+        nounPlural="objects"
+      />
 
       {/* Step 3 — Publish */}
       <div className={`sf-section ${connected ? '' : 'disabled'}`}>

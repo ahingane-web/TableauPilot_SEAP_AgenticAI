@@ -65,7 +65,7 @@ export const DEFAULT_SALESFORCE_API_VERSION = '68.0';
  * `relationshipPerf` adds `<ObjectModelRelationshipPerfOptions />`, which is present in the
  * relationships reference but absent from the single-object one; the other flags are shared.
  */
-function documentFormatChangeManifestXml(relationshipPerf = false): string {
+export function documentFormatChangeManifestXml(relationshipPerf = false): string {
   const perf = relationshipPerf ? `    <ObjectModelRelationshipPerfOptions />\n` : '';
   return (
     `  <document-format-change-manifest>\n` +
@@ -484,7 +484,7 @@ function relationCollectionXml(tables: SalesforceTableSpec[], connectionName: st
 }
 
 /** Merged `<cols>` alias map (`[Object.Field]` -> `[Object].[Field]`) across all objects. */
-function colsMapMultiXml(tables: SalesforceTableSpec[], indent = '    '): string {
+export function colsMapMultiXml(tables: SalesforceTableSpec[], indent = '    '): string {
   const inner = indent + '  ';
   const maps: string[] = [];
   for (const t of tables) {
@@ -499,7 +499,7 @@ function colsMapMultiXml(tables: SalesforceTableSpec[], indent = '    '): string
 }
 
 /** Merged `<metadata-records>` (one record per column, across all objects). */
-function metadataRecordsMultiXml(tables: SalesforceTableSpec[], indent = '    '): string {
+export function metadataRecordsMultiXml(tables: SalesforceTableSpec[], indent = '    '): string {
   const inner = indent + '  ';
   const blocks = tables
     .map((t) => {
@@ -516,7 +516,7 @@ function metadataRecordsMultiXml(tables: SalesforceTableSpec[], indent = '    ')
 }
 
 /** Datasource-level `<column>` elements (one per column) named by their unique alias. */
-function columnsMultiXml(tables: SalesforceTableSpec[]): string {
+export function columnsMultiXml(tables: SalesforceTableSpec[]): string {
   let out = '';
   for (const t of tables) {
     for (const f of validColumns(t.fields)) {
@@ -527,7 +527,7 @@ function columnsMultiXml(tables: SalesforceTableSpec[]): string {
 }
 
 /** `<extract>` with a `class='hyper'` connection over N `Extract."<Object>"` tables (relationships model). */
-function extractElementMultiXml(tables: SalesforceTableSpec[], hyperDbname: string): string {
+export function extractElementMultiXml(tables: SalesforceTableSpec[], hyperDbname: string): string {
   const relations = tables
     .map((t) => {
       const n = escapeXml(t.object);
@@ -545,7 +545,7 @@ function extractElementMultiXml(tables: SalesforceTableSpec[], hyperDbname: stri
  * indented to sit inside the `<connection>` (6 spaces). The merged `<cols>`/`<metadata-records>`
  * use the same qualified `[Object.Field]` aliases as the physical connection.
  */
-function extractElementWithRelationXml(
+export function extractElementWithRelationXml(
   tables: SalesforceTableSpec[],
   hyperDbname: string,
   relationXml: string,
@@ -632,7 +632,7 @@ function columnElementAliased(field: SalesforceColumnSpec, alias: string): strin
 }
 
 /** `<cols>` alias map (`[Field]` -> `[Object].[Field]`) for the given fields, or '' if none. */
-function colsMapXml(fields: SalesforceColumnSpec[], objName: string, indent = '    '): string {
+export function colsMapXml(fields: SalesforceColumnSpec[], objName: string, indent = '    '): string {
   if (fields.length === 0) return '';
   const inner = indent + '  ';
   return (
@@ -643,7 +643,7 @@ function colsMapXml(fields: SalesforceColumnSpec[], objName: string, indent = ' 
 }
 
 /** `<metadata-records>` block (one record per field) for the given fields, or '' if none. */
-function metadataRecordsXml(
+export function metadataRecordsXml(
   fields: SalesforceColumnSpec[],
   object: string,
   objectId: string,
@@ -662,7 +662,7 @@ function metadataRecordsXml(
  * `.hyper` bundled in the `.tdsx`. The extract table lives in schema `Extract` and is
  * named after the object; its columns mirror the live schema (same field set/types).
  */
-function extractElementXml(
+export function extractElementXml(
   fields: SalesforceColumnSpec[],
   object: string,
   objName: string,
@@ -754,7 +754,7 @@ function metadataRecord(
 }
 
 /** A single datasource-level `<column>` element for a described Salesforce field. */
-function columnElement(field: SalesforceColumnSpec): string {
+export function columnElement(field: SalesforceColumnSpec): string {
   const twb = salesforceToTwbDataType(field.salesforceType);
   const role = twb === 'integer' || twb === 'real' ? 'measure' : 'dimension';
   const type = role === 'measure' ? 'quantitative' : twb === 'date' || twb === 'datetime' ? 'ordinal' : 'nominal';

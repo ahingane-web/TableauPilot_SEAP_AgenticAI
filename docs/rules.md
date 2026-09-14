@@ -1,7 +1,7 @@
 # Engineering & AI Rules — TableauPilot AI
 
 > **Binding** rules for anyone (human or AI) working in this repo. Update this whenever
-> an invariant, convention, or constraint changes. Last updated: 2026-09-13.
+> an invariant, convention, or constraint changes. Last updated: 2026-09-14.
 
 ## 1. Tech to use / avoid
 
@@ -11,6 +11,7 @@
 - **Hono** for the BFF; **React 18 + Vite** for the SPA.
 - **Zod** for all structured LLM output and boundary validation.
 - **`undici`** fetch, **`fflate`** for zip, **LibSQL** for Mastra storage.
+- **`exceljs`** to parse uploaded `.xlsx`/`.xlsm` workbooks (Excel connector only).
 - **Vitest** (unit/integration) + **Playwright** (E2E, non-destructive).
 
 **Avoid**
@@ -86,6 +87,12 @@
   join (`<relation type='join'>`). Materialize the `.hyper` locally via the Python sidecar
   and publish the `.tdsx`. After publish, embed the saved credential + trigger a refresh
   (best-effort; never fail the publish). All XML is code-generated, never LLM-generated.
+- **Excel extract-only datasources:** generate the `.tds` deterministically in
+  `excelTdsGenerator.ts` (a `class='excel-direct'` connection + `[<sheet>$]` relations,
+  **reusing** the connection-agnostic `tdsGenerator.ts` helpers — do NOT fork Salesforce
+  logic). Sheets are the "objects"; sheet/column names are sanitized to identifier-safe ids.
+  Publish **extract-only**: NO `connectionCredentials`, NO credential embed, NO refresh — the
+  bundled `.hyper` is the data. Never change Salesforce datasource logic to add Excel.
 
 ## 6. Coding conventions
 

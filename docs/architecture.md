@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-09-13.
+> decisions change. Last updated: 2026-09-14.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -111,6 +111,28 @@ connect to Salesforce (username/password or OAuth) → auto-resolve REST API ver
 Salesforce creds + live session live only on `session.connectors.salesforce` (in-memory)
 and are cleared once publishing completes; the published datasource authenticates via the
 **saved Salesforce credential** on Tableau Cloud, never an embedded password.
+
+## 3c. Data flow — Excel extract-only datasource (`excelBuildAndPublishDatasource`)
+
+The "Build datasource" flow is **connector-pluggable**: the modeling step is a shared
+`DataModelBuilder` component, and the extract/publish pipeline is connector-agnostic. Excel
+sheets play the exact role Salesforce objects play.
+
+```
+upload .xlsx  →  server parses it once (exceljs): sheets + typed columns + rows,
+                 names sanitized to identifier-safe ids (stashed on session.connectors.excel)
+  → user models SHEETS in the shared DataModelBuilder (mode + relationships/joins)
+  → generate .tds  (single | relationships object-graph | physical join) via excelTdsGenerator
+       (excel-direct connection + [Sheet$] relations; reuses the Salesforce .tds helpers)
+  → materialize .hyper + package .tdsx   (SAME Python Hyper sidecar)
+  → REST publish the .tdsx  EXTRACT-ONLY  (no connectionCredentials; no embed; no refresh)
+  → lock datasource + cache sheet fields  →  converge on the normal dashboard flow
+```
+
+The uploaded workbook (schema + rows) lives only on `session.connectors.excel` (in-memory)
+and is cleared once publishing completes. The published datasource is a static extract —
+the bundled `.hyper` IS the data ("include external files → extract"); the `excel-direct`
+`filename` is retained only for lineage and is never read on Tableau Cloud.
 
 ## 4. Trust & secret boundaries
 

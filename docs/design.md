@@ -67,6 +67,11 @@ tableauAuth, flow }`; `createSession/getSession/destroySession/startSessionSweep
   relationships[], mode, projectId, datasourceName, overwrite?, serverOauthCustom?). A
   `.superRefine` enforces multi-object connectivity: relationships must reference known
   tables and connect **every** table into one graph (union-find `isConnected`).
+- **Excel connector** (in `common.ts`): `ExcelIdentifierSchema` (identifier-safe sheet/
+  field id) and `ExcelBuildSchema` (sheets[min 1], relationships[] reusing
+  `SalesforceRelationshipSchema`, mode, projectId, datasourceName, overwrite?) with the
+  same union-find connectivity `.superRefine` as Salesforce (only the noun differs). No
+  credentials (extract-only).
 
 **Decision:** the LLM produces a *draft* (no publishing/datasource). The server injects
 the locked datasource + approved project so the model can't redirect output.
@@ -198,6 +203,44 @@ refresh** (best-effort; see the caveat in [memory.md](./memory.md) about multi-o
 server-side rebuilds). Transient Salesforce state lives on `session.connectors.salesforce`
 and is cleared after publish; Salesforce credentials are never embedded.
 
+## 5c. Excel connector — extract-only datasource builder
+
+A third "Build datasource" entry point that uploads an **Excel** workbook, lists its
+**sheets as "objects"**, and reuses the SAME modeling + extract + publish pipeline to
+publish an **extract-only** datasource (no live credential, no refresh). No Salesforce
+logic is touched — `tdsGenerator.ts` only gains additive `export`s, and the modeling UI is
+extracted into a shared component.
+
+**Workbook parsing (`src/excel/excelClient.ts`)** — `parseWorkbook(buffer, {maxRows})`
+(via `exceljs`) → `{ sheets: ExcelSheet[] }`, where each `ExcelSheet` = `{ id, caption,
+columns: {name,label,type}[], rows }`. Sheet/column names are sanitized to
+identifier-safe, unique ids (`[A-Za-z][A-Za-z0-9_]*`; originals kept as `caption`/`label`)
+so they survive the Salesforce-grade `.tds`/`.hyper` pipeline (real Excel already forbids
+`: / [ ] * ? \` in sheet names). Per-column type inference samples cells (number→
+integer/real, `Date`→date/datetime, boolean→boolean, else string); rows are coerced
+(dates→ISO `YYYY-MM-DD` / `YYYY-MM-DDTHH:MM:SS`) and capped at `hyper.maxRows`.
+
+**TDS generation (`src/tableau/authoring/excelTdsGenerator.ts`)** — `generateExcelTds`
+(single sheet), `generateExcelRelationshipsTds`, `generateExcelPhysicalJoinTds`, plus
+`excelToHyperType`. Structurally identical to the Salesforce generators except: the
+named-connection is `class='excel-direct'` with the uploaded `filename`, and physical
+relations reference the sheet range `table='[<sheet>$]'`. It **reuses** the exported
+connection-agnostic helpers from `tdsGenerator.ts` (`documentFormatChangeManifestXml`,
+`colsMap*Xml`, `metadataRecords*Xml`, `columnsMultiXml`, `extractElement*Xml`,
+`columnElement`, `salesforceObjectId`) by adapting each Excel column to a
+`SalesforceColumnSpec` via a synthetic type token — so the extract, cols map,
+metadata-records, columns, and object-graph output are the same as Salesforce (the sheet id
+plays the role of the object). Reconciled against `reference/sample ds Excel Connector.tds`.
+
+**Façade (`src/tableau/index.ts`)** — `excelStoreUpload(session, buffer, filename)` parses
++ stashes transient `session.connectors.excel = { uploadId, filename, sheets }` and returns
+non-secret sheet identity; `excelBuildAndPublishDatasource(session, input)` selects the
+sheets, validates the relationship join-fields, builds the `.tds` (single/relationships/
+join by `mode`) + `.hyper`/`.tdsx` via the SAME `buildExtractTdsx`, calls `publishDatasource`
+with **no `connectionCredentials`** and **skips** credential embed + refresh (extract-only),
+locks the datasource, and writes `session.flow.connectorMetadata` via `excelSheetsToMetadata`
+(qualified `SheetId.Field` for multi-sheet). The transient upload is cleared after publish.
+
 ## 6. Validation & guards (`src/validation/*`)
 
 - `fieldValidation.ts`: `validatePlanFields(plan, metadata)` extracts fields from
@@ -250,6 +293,8 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | GET | `/api/connectors/salesforce/tables` | listed objects for the session |
 | POST | `/api/connectors/salesforce/describe` | describe an object's fields |
 | POST | `/api/connectors/salesforce/publish` | build + publish extract datasource |
+| POST | `/api/connectors/excel/upload` | upload `.xlsx`/`.xlsm` (multipart) → list sheets + columns |
+| POST | `/api/connectors/excel/publish` | build + publish an **extract-only** Excel datasource |
 
 Client returns a sanitized error envelope `{ error: { code, message, hint?, details? } }`.
 

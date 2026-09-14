@@ -6,9 +6,15 @@
  */
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { DashboardPlan } from '../schemas/dashboardPlan.js';
-import type { DatasourceLock, FieldRole, TableauProjectContext } from '../schemas/common.js';
+import type {
+  DatasourceLock,
+  FieldRole,
+  TableauProjectContext,
+  SalesforceRelationship,
+  SalesforceBuildMode,
+} from '../schemas/common.js';
 import { AppError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 import { assertApproved, assertDatasourceLock, assertProjectMatch } from '../validation/guards.js';
@@ -50,7 +56,14 @@ import {
   salesforceToTwbDataType,
   salesforceToHyperType,
 } from './authoring/tdsGenerator.js';
-import { buildExtractTdsx, type ExtractColumn } from './publishing/hyperPackager.js';
+import {
+  generateExcelTds,
+  generateExcelRelationshipsTds,
+  generateExcelPhysicalJoinTds,
+  excelToHyperType,
+} from './authoring/excelTdsGenerator.js';
+import { buildExtractTdsx, type ExtractColumn, type ExtractTable } from './publishing/hyperPackager.js';
+import { parseWorkbook, type ExcelSheet, type ExcelColumn } from '../excel/excelClient.js';
 
 /** Result of building/publishing a Salesforce extract datasource (API/UI contract). */
 export interface ExtractResult {
@@ -175,6 +188,62 @@ function salesforceTablesToMetadata(
       if (seen.has(qualified)) continue;
       seen.add(qualified);
       mapped.push({ ...salesforceFieldToDatasourceField(f), name: qualified });
+    }
+  }
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+/** Map a parsed Excel column to a Tableau datasource field. */
+function excelColumnToDatasourceField(c: ExcelColumn, name = c.name): DatasourceField {
+  const dataType =
+    c.type === 'integer'
+      ? 'INTEGER'
+      : c.type === 'real'
+        ? 'REAL'
+        : c.type === 'boolean'
+          ? 'BOOLEAN'
+          : c.type === 'date'
+            ? 'DATE'
+            : c.type === 'datetime'
+              ? 'DATETIME'
+              : 'STRING';
+  const isDate = c.type === 'date' || c.type === 'datetime';
+  const role: FieldRole = c.type === 'integer' || c.type === 'real' ? 'measure' : 'dimension';
+  return { name, role, dataType, isDate, fieldType: 'ColumnField' };
+}
+
+/** Build DatasourceMetadata from a single Excel sheet's columns. */
+function excelFieldsToMetadata(datasourceId: string, datasourceName: string, sheet: ExcelSheet): DatasourceMetadata {
+  const mapped: DatasourceField[] = sheet.columns.map((c) => excelColumnToDatasourceField(c));
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+/**
+ * Build DatasourceMetadata for a MULTI-sheet Excel datasource. Field names are qualified
+ * `SheetId.Field` so they stay collision-free and match the `[SheetId.Field]` aliases
+ * emitted in the generated `.tds` (mirrors {@link salesforceTablesToMetadata}).
+ */
+function excelSheetsToMetadata(datasourceId: string, datasourceName: string, sheets: ExcelSheet[]): DatasourceMetadata {
+  const mapped: DatasourceField[] = [];
+  for (const s of sheets) {
+    for (const c of s.columns) {
+      mapped.push(excelColumnToDatasourceField(c, `${s.id}.${c.name}`));
     }
   }
   return {
@@ -404,6 +473,209 @@ export const TableauService = {
     }
     const fields = await Salesforce.describeObject(sf.sfSession, name);
     return fields.map((f) => ({ name: f.name, label: f.label, type: f.type }));
+  },
+
+  /**
+   * Parse an uploaded Excel workbook and stash it as transient connector state, returning
+   * non-secret sheet identity (id/caption/rowCount + column name/label/type) for the UI's
+   * sheet + relationship builder. The parsed rows are held in memory only until the Excel
+   * datasource is published (or the session is cleared). Mirrors the role Salesforce's
+   * `connect` + `describe` play, but sourced entirely from the uploaded file (no network).
+   */
+  async excelStoreUpload(
+    session: Session,
+    buffer: Buffer,
+    filename: string,
+  ): Promise<{
+    uploadId: string;
+    filename: string;
+    sheets: Array<{
+      id: string;
+      caption: string;
+      rowCount: number;
+      fields: Array<{ name: string; label: string; type: string }>;
+    }>;
+  }> {
+    requireAuth(session);
+    const cfg = getConfig();
+    const parsed = await parseWorkbook(buffer, { maxRows: cfg.hyper.maxRows });
+    if (parsed.sheets.length === 0) {
+      throw new AppError('CONNECTOR_API', 'No readable sheets were found in the uploaded workbook.');
+    }
+    const uploadId = randomBytes(8).toString('hex');
+    const safeName = basename(String(filename ?? '').trim()) || 'workbook.xlsx';
+    session.connectors = {
+      ...(session.connectors ?? {}),
+      excel: { uploadId, filename: safeName, sheets: parsed.sheets },
+    };
+    return {
+      uploadId,
+      filename: safeName,
+      sheets: parsed.sheets.map((s) => ({
+        id: s.id,
+        caption: s.caption,
+        rowCount: s.rows.length,
+        fields: s.columns.map((c) => ({ name: c.name, label: c.label, type: c.type })),
+      })),
+    };
+  },
+
+  /**
+   * Build an Excel EXTRACT datasource from the uploaded workbook (single sheet, or multiple
+   * sheets joined via relationships/physical join) and publish it to the given Tableau Cloud
+   * project, then lock it as the session's source of truth.
+   *
+   * The datasource is EXTRACT-ONLY: the selected sheets' rows are materialized into a local
+   * `.hyper` (via the Python Hyper sidecar) and packaged into a `.tdsx`. It is published with
+   * NO connection credentials and NO server-side refresh — the bundled extract IS the data,
+   * and the `excel-direct` connection is retained only for schema/lineage. Salesforce build
+   * logic is untouched.
+   */
+  async excelBuildAndPublishDatasource(
+    session: Session,
+    input: {
+      /** Identifier-safe sheet ids (from {@link excelStoreUpload}). One = single-table; many = relationships. */
+      sheets: string[];
+      /** Data-modeling edges connecting the sheets (empty for a single-sheet build). */
+      relationships?: SalesforceRelationship[];
+      /** Multi-sheet data-modeling mode: relationships (object-graph) or a physical join. */
+      mode?: SalesforceBuildMode;
+      /** Target Tableau project id to publish into. */
+      projectId: string;
+      /** Name for the new datasource. */
+      datasourceName: string;
+      /** Overwrite an existing datasource of the same name. */
+      overwrite?: boolean;
+    },
+  ): Promise<{
+    datasource: TableauDatasource;
+    lock: DatasourceLock;
+    projectContext: TableauProjectContext;
+    extract: ExtractResult;
+  }> {
+    requireAuth(session);
+
+    const excel = session.connectors?.excel;
+    if (!excel?.sheets?.length) {
+      throw new AppError('CONNECTOR_API', 'No Excel workbook is loaded. Upload a .xlsx file first.');
+    }
+    const wantedIds = (input.sheets ?? []).map((s) => String(s ?? '').trim());
+    if (wantedIds.length === 0) {
+      throw new AppError('VALIDATION', 'Select at least one sheet to build a datasource.');
+    }
+    if (new Set(wantedIds).size !== wantedIds.length) {
+      throw new AppError('VALIDATION', 'Duplicate sheets are not allowed.');
+    }
+    const byId = new Map(excel.sheets.map((s) => [s.id, s]));
+    const selected: ExcelSheet[] = wantedIds.map((id) => {
+      const s = byId.get(id);
+      if (!s) throw new AppError('VALIDATION', `Sheet "${id}" was not found in the uploaded workbook.`);
+      return s;
+    });
+
+    const relationships = input.relationships ?? [];
+    const project = (await this.listProjects(session)).find((p) => p.id === input.projectId);
+    if (!project) {
+      throw new AppError('NOT_FOUND', 'Target project not found among your accessible projects.');
+    }
+
+    // Validate every relationship's join fields exist on the respective selected sheets.
+    const colSetBySheet = new Map(selected.map((s) => [s.id, new Set(s.columns.map((c) => c.name))]));
+    for (const r of relationships) {
+      if (!colSetBySheet.get(r.leftObject)?.has(r.leftField)) {
+        throw new AppError('VALIDATION', `Join field "${r.leftField}" was not found on sheet "${r.leftObject}".`);
+      }
+      if (!colSetBySheet.get(r.rightObject)?.has(r.rightField)) {
+        throw new AppError('VALIDATION', `Join field "${r.rightField}" was not found on sheet "${r.rightObject}".`);
+      }
+    }
+
+    const hyperName = `federated_${randomBytes(10).toString('hex')}.hyper`;
+    const hyperDbname = `Data/Extracts/${hyperName}`;
+    const isMulti = selected.length > 1;
+    const primary = selected[0]!;
+    const mode = input.mode ?? 'relationship';
+
+    let tdsXml: string;
+    if (isMulti) {
+      const tables = selected.map((s) => ({
+        sheet: s.id,
+        caption: s.caption,
+        columns: s.columns.map((c) => ({ name: c.name, type: c.type })),
+      }));
+      const relInput = {
+        datasourceName: input.datasourceName,
+        filename: excel.filename,
+        tables,
+        relationships,
+        extract: { hyperDbname },
+      };
+      tdsXml = mode === 'join' ? generateExcelPhysicalJoinTds(relInput) : generateExcelRelationshipsTds(relInput);
+    } else {
+      tdsXml = generateExcelTds({
+        datasourceName: input.datasourceName,
+        filename: excel.filename,
+        sheet: primary.id,
+        caption: primary.caption,
+        columns: primary.columns.map((c) => ({ name: c.name, type: c.type })),
+        extract: { hyperDbname },
+      });
+    }
+
+    // Materialize the extract locally and package a `.tdsx` (Python Hyper sidecar).
+    const extractTables: ExtractTable[] = selected.map((s) => ({
+      object: s.id,
+      schema: s.columns.map((c) => ({ name: c.name, type: excelToHyperType(c.type) })) as ExtractColumn[],
+      rows: s.rows,
+    }));
+    const tdsxBuffer = await buildExtractTdsx({ tdsXml, hyperName, tables: extractTables });
+
+    // Publish EXTRACT-ONLY: no connection credentials embedded, and no server-side refresh
+    // (there is no live credential to re-pull from). "Include external files" is satisfied by
+    // the bundled `.hyper` — the datasource is viewable immediately from the extract.
+    const published = await publishDatasource(getClient(session), {
+      siteId: siteId(session),
+      projectId: project.id,
+      datasourceName: input.datasourceName,
+      tdsxBuffer,
+      overwrite: input.overwrite,
+    });
+
+    // Publishing target for the eventual workbook = where we published the datasource.
+    this.setProjectContext(session, { siteId: siteId(session), projectId: project.id, projectName: project.name });
+
+    const ds: TableauDatasource = {
+      id: published.id,
+      name: published.name,
+      contentUrl: published.contentUrl,
+      projectId: published.projectId,
+      projectName: published.projectName,
+    };
+    const lock = this.lockDatasource(session, ds);
+
+    // Cache the sheet fields so the dashboard flow has real fields immediately. Multi-sheet
+    // fields are qualified (`SheetId.Field`) to match the generated `.tds` aliases.
+    session.flow.connectorMetadata = {
+      ...(session.flow.connectorMetadata ?? {}),
+      [ds.id]: isMulti
+        ? excelSheetsToMetadata(ds.id, ds.name, selected)
+        : excelFieldsToMetadata(ds.id, ds.name, primary),
+    };
+
+    // Discard the transient upload now that publishing is complete.
+    session.connectors = undefined;
+
+    const totalRows = selected.reduce((sum, s) => sum + s.rows.length, 0);
+    const anyCapped = selected.some((s) => s.rows.length >= getConfig().hyper.maxRows);
+    const tableSummary = isMulti ? ` across ${selected.length} sheets` : '';
+    const extract: ExtractResult = {
+      state: 'succeeded',
+      message:
+        `Extract built with ${totalRows.toLocaleString()} row(s)${tableSummary}` +
+        `${anyCapped ? ` (some sheets capped at ${getConfig().hyper.maxRows.toLocaleString()})` : ''}. ` +
+        `Published as an extract-only datasource.`,
+    };
+    return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract };
   },
 
   /**

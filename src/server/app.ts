@@ -24,7 +24,14 @@ import {
   updateWorksheetFormatting,
 } from '../planning/index.js';
 import { hashPlan } from '../validation/guards.js';
-import { HexColorSchema, TextFormatSchema, SalesforceCredentialsSchema, SalesforceBuildSchema, FitModeSchema } from '../schemas/common.js';
+import {
+  HexColorSchema,
+  TextFormatSchema,
+  SalesforceCredentialsSchema,
+  SalesforceBuildSchema,
+  ExcelBuildSchema,
+  FitModeSchema,
+} from '../schemas/common.js';
 import { ReferenceLineSpecSchema, ColorMapSpecSchema, GrandTotalsSchema } from '../schemas/worksheetSpec.js';
 import { runPublishAndVerify } from '../execution/index.js';
 import { TableauService } from '../tableau/index.js';
@@ -390,6 +397,70 @@ export function createApp(): Hono {
       overwrite: Boolean(parsed.data.overwrite),
       // Default true (matches the reference); allow the client to opt into built-in OAuth.
       serverOauthCustom: parsed.data.serverOauthCustom !== false,
+    });
+    return c.json({
+      datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },
+      extract: { state: result.extract.state, message: result.extract.message },
+      ...contextSnapshot(session),
+    });
+  });
+
+  // Upload an Excel workbook (.xlsx/.xlsm) via multipart. The server parses it once and
+  // returns the sheet list + per-sheet column identity (used as the "objects"/fields for
+  // the same relationship builder Salesforce uses). Parsed rows are held transiently in the
+  // session until the Excel datasource is published.
+  app.post('/api/connectors/excel/upload', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.parseBody();
+    const file = body['file'];
+    if (!(file instanceof File)) {
+      throw new AppError('VALIDATION', 'Attach an .xlsx file to upload (form field "file").');
+    }
+    const name = file.name || 'workbook.xlsx';
+    if (!/\.(xlsx|xlsm)$/i.test(name)) {
+      throw new AppError('VALIDATION', 'Unsupported file type. Upload a modern Excel workbook (.xlsx or .xlsm).');
+    }
+    const maxBytes = 25 * 1024 * 1024;
+    if (file.size > maxBytes) {
+      throw new AppError('VALIDATION', 'That file is too large. The maximum upload size is 25 MB.');
+    }
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const result = await TableauService.excelStoreUpload(session, buffer, name);
+    return c.json(result);
+  });
+
+  // Build an Excel EXTRACT datasource from the uploaded workbook (single sheet, or multiple
+  // sheets joined via relationships/physical join) and publish it EXTRACT-ONLY.
+  app.post('/api/connectors/excel/publish', async (c) => {
+    const session = requireSession(c);
+    const raw = await c.req.json<{
+      sheets?: unknown;
+      relationships?: unknown;
+      mode?: unknown;
+      projectId?: string;
+      datasourceName?: string;
+      overwrite?: boolean;
+    }>();
+    const parsed = ExcelBuildSchema.safeParse({
+      sheets: Array.isArray(raw.sheets) ? raw.sheets : [],
+      relationships: Array.isArray(raw.relationships) ? raw.relationships : [],
+      ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+      projectId: raw.projectId,
+      datasourceName: raw.datasourceName,
+      overwrite: raw.overwrite,
+    });
+    if (!parsed.success) {
+      throw new AppError('VALIDATION', 'Invalid Excel datasource request. Check the sheets, relationships, project, and name.', {
+        details: { issues: zodIssues(parsed.error) },
+      });
+    }
+    const result = await TableauService.excelBuildAndPublishDatasource(session, {
+      sheets: parsed.data.sheets,
+      relationships: parsed.data.relationships,
+      mode: parsed.data.mode,
+      projectId: parsed.data.projectId,
+      datasourceName: parsed.data.datasourceName,
+      overwrite: Boolean(parsed.data.overwrite),
     });
     return c.json({
       datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },

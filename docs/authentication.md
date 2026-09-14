@@ -1,7 +1,8 @@
 # Authentication
 
 There are two distinct Tableau authentications, plus the local vault identity — and,
-for the Salesforce connector, a separate Salesforce sign-in (§4).
+for the Salesforce connector, a separate Salesforce sign-in (§4). The Excel connector
+requires **no sign-in at all** (§5).
 
 ## 1. Local vault identity (username + 6-digit PIN)
 
@@ -49,6 +50,15 @@ Only used by the Salesforce data-source builder; unrelated to Tableau auth above
   salesforce`), cleared after publish, and **never embedded** in the published extract.
   The published datasource refreshes via the **saved Salesforce credential** on Tableau
   Cloud (embedded on the connection by username match). See [security.md](./security.md).
+
+## 5. Excel connector (extract datasource builder)
+
+The Excel connector has **no authentication step**. The user uploads an `.xlsx`, which is
+parsed **in memory** (`src/excel/excelClient.ts`); there is no external system to sign in
+to and no credential is ever collected. The parsed sheets are held transiently on
+`session.connectors.excel` and cleared after publish. Because the datasource is published
+**extract-only**, nothing is embedded and there is no saved credential to refresh against.
+See [security.md](./security.md).
 
 ## Token boundaries (summary)
 

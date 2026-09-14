@@ -1,7 +1,8 @@
 # Python Dependency Decision — scoped to extract building
 
 **Decision: TableauPilot is TypeScript / Node.js, with ONE narrow exception — a Python
-Hyper API sidecar used solely to materialize Salesforce `.hyper` extracts.**
+Hyper API sidecar used solely to materialize `.hyper` extracts for the Build-datasource
+connectors (Salesforce and Excel).**
 
 ## Background
 
@@ -32,7 +33,9 @@ is exactly the trigger this document always named for revisiting the no-Python s
   with the generated `.tds` into a `.tdsx`. That is the entire surface.
 - Invoked as a subprocess by
   [`src/tableau/publishing/hyperPackager.ts`](../src/tableau/publishing/hyperPackager.ts).
-  All Salesforce access, `.tds`/`.twb` authoring, and publishing stay in TypeScript.
+  Both connectors reuse this one sidecar: the Excel connector parses the workbook in
+  TypeScript (`exceljs`) and feeds the same schema + rows into it. All connector access,
+  `.tds`/`.twb` authoring, and publishing stay in TypeScript.
 - Installed into a local virtualenv via `npm run setup:hyper` (`.venv-hyper/`, gitignored).
   The interpreter path is configurable via `HYPER_PYTHON`.
 - No secrets or row data are passed on argv — only temp file paths.
@@ -44,6 +47,9 @@ is exactly the trigger this document always named for revisiting the no-Python s
   publish, the orchestration embeds the publisher's **saved Salesforce OAuth credential**
   on the datasource connection and triggers an extract refresh so the datasource is
   refreshable on Cloud (see [design.md](./design.md) §5b and [memory.md](./memory.md)).
+  The Excel connector materializes the `.hyper` the same way, but publishes it
+  **extract-only** — no credential is embedded and no refresh is triggered (the bundled
+  extract is the data).
 - XML is still generated deterministically in TypeScript, never by the LLM.
 - If a future feature needs richer local extract logic, extend the sidecar rather than
   spreading Python across the codebase.
