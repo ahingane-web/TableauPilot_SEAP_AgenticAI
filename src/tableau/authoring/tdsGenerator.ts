@@ -54,6 +54,31 @@ export const DEFAULT_SALESFORCE_AUTH_MODE: SalesforceAuthMode = 'oauth';
 /** Salesforce connector API version declared on the connection (from the reference). */
 export const DEFAULT_SALESFORCE_API_VERSION = '68.0';
 
+/**
+ * The `<document-format-change-manifest>` that marks a datasource as using Tableau's V2
+ * object model + extract-V2. BOTH working references emit this as the FIRST child of
+ * `<datasource>` (`reference/sample_datasource_DataModelling.tds` and the embedded `.tds`
+ * in `reference/Salesforce_Account_DS.tdsx`). WITHOUT it, Tableau loads an extract-backed
+ * datasource in LEGACY mode and flattens every table into a single "Migrated Data" table,
+ * silently discarding the `<object-graph>` (this was the relationship-vs-migrated-data bug).
+ *
+ * `relationshipPerf` adds `<ObjectModelRelationshipPerfOptions />`, which is present in the
+ * relationships reference but absent from the single-object one; the other flags are shared.
+ */
+function documentFormatChangeManifestXml(relationshipPerf = false): string {
+  const perf = relationshipPerf ? `    <ObjectModelRelationshipPerfOptions />\n` : '';
+  return (
+    `  <document-format-change-manifest>\n` +
+    `    <ObjectModelEncapsulateLegacy />\n` +
+    `    <ObjectModelExtractV2 />\n` +
+    perf +
+    `    <ObjectModelTableType />\n` +
+    `    <SchemaViewerObjectModel />\n` +
+    `    <VConnDownstreamExtractsWithWarnings />\n` +
+    `  </document-format-change-manifest>\n`
+  );
+}
+
 /** The Tableau `authentication` attribute value for a given auth mode. */
 export function authAttrForMode(mode: SalesforceAuthMode): string {
   return mode === 'username-password' ? 'auth-user-pass' : 'auth-oauth';
@@ -206,6 +231,7 @@ export function generateSalesforceTds(input: SalesforceTdsInput): string {
   return (
     `<?xml version='1.0' encoding='utf-8' ?>\n` +
     `<datasource formatted-name='${formattedName}' inline='true' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>\n` +
+    documentFormatChangeManifestXml() +
     `  <connection class='federated'>\n` +
     `    <named-connections>\n` +
     `      <named-connection caption='${serverHost}' name='${CONNECTION_NAME}'>\n` +
@@ -219,9 +245,9 @@ export function generateSalesforceTds(input: SalesforceTdsInput): string {
     colsXml +
     metadataXml +
     `  </connection>\n` +
+    `  <aliases enabled='yes' />\n` +
     columnsXml +
     extractXml +
-    `  <aliases enabled='yes' />\n` +
     `</datasource>\n`
   );
 }
@@ -313,6 +339,7 @@ export function generateSalesforceRelationshipsTds(input: SalesforceRelationship
   return (
     `<?xml version='1.0' encoding='utf-8' ?>\n` +
     `<datasource formatted-name='${formattedName}' inline='true' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>\n` +
+    documentFormatChangeManifestXml(true) +
     `  <connection class='federated'>\n` +
     `    <named-connections>\n` +
     `      <named-connection caption='${serverHost}' name='${CONNECTION_NAME}'>\n` +
@@ -326,9 +353,9 @@ export function generateSalesforceRelationshipsTds(input: SalesforceRelationship
     colsMapMultiXml(tables) +
     metadataRecordsMultiXml(tables, '    ') +
     `  </connection>\n` +
+    `  <aliases enabled='yes' />\n` +
     columnsMultiXml(tables) +
     extractElementMultiXml(tables, input.extract.hyperDbname) +
-    `  <aliases enabled='yes' />\n` +
     objectGraphXml(tables, input.relationships ?? [], CONNECTION_NAME) +
     `</datasource>\n`
   );
@@ -366,6 +393,7 @@ export function generateSalesforcePhysicalJoinTds(input: SalesforceRelationships
   return (
     `<?xml version='1.0' encoding='utf-8' ?>\n` +
     `<datasource formatted-name='${formattedName}' inline='true' version='18.1' xmlns:user='http://www.tableausoftware.com/xml/user'>\n` +
+    documentFormatChangeManifestXml() +
     `  <connection class='federated'>\n` +
     `    <named-connections>\n` +
     `      <named-connection caption='${serverHost}' name='${CONNECTION_NAME}'>\n` +
@@ -379,13 +407,13 @@ export function generateSalesforcePhysicalJoinTds(input: SalesforceRelationships
     colsMapMultiXml(tables) +
     metadataRecordsMultiXml(tables, '    ') +
     `  </connection>\n` +
+    `  <aliases enabled='yes' />\n` +
     columnsMultiXml(tables) +
     extractElementWithRelationXml(
       tables,
       input.extract.hyperDbname,
       joinRelationTreeXml(tables, relationships, {}, '      '),
     ) +
-    `  <aliases enabled='yes' />\n` +
     `</datasource>\n`
   );
 }

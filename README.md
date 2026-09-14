@@ -105,6 +105,13 @@ npm start            # NODE_ENV=production; serves API and the built SPA
 (Hyper sidecar), published to your chosen project, and the saved Salesforce credential is
 embedded + an extract refresh is triggered.
 
+**Interface** — a light, Tableau-themed two-pane layout: the AI workflow on the left and the
+read-only published dashboard on the right. Use **Hide/Show dashboard** in the top bar to
+collapse the preview and give the workflow full width, and the collapsible **Datasource
+fields** and **Sheets & dashboards** sections to keep things tidy. After edits you get clear
+status messages — "Modifications done — waiting for approval to build" for a revised plan, and
+"Modification done and dashboard published successfully" after an in-place modify.
+
 ## Mastra Studio
 
 `npm run dev:studio` runs `mastra dev`, exposing the same agent, tools, workflows, and

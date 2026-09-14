@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { api } from '../api';
 import type { CreationResult, FitMode, PlanningResult, ReferenceLineView, SessionContext, WorksheetSpecView } from '../types';
-import { Busy, ErrorPanel } from './common';
+import { Busy, ErrorPanel, Collapsible } from './common';
 
 /**
  * Natural-language request -> plan preview -> human approval -> execute -> verify.
@@ -19,6 +19,8 @@ export function PlanPanel({
   const [request, setRequest] = useState('');
   const [planning, setPlanning] = useState<PlanningResult | null>(null);
   const [approved, setApproved] = useState(false);
+  // UI-only: true once the plan has been modified (revise/edit) and is awaiting re-approval.
+  const [edited, setEdited] = useState(false);
   const [sizeConfirmed, setSizeConfirmed] = useState(false);
   const [result, setResult] = useState<CreationResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -32,6 +34,7 @@ export function PlanPanel({
     setBusy('plan');
     setPlanning(null);
     setApproved(false);
+    setEdited(false);
     setSizeConfirmed(false);
     setResult(null);
     try {
@@ -53,6 +56,7 @@ export function PlanPanel({
       const res = await api.setPublishing(opts);
       setPlanning(res);
       setApproved(false); // publishing change invalidates prior approval
+      setEdited(true);
       onChange(await api.context());
     } catch (err) {
       setError(err);
@@ -69,6 +73,7 @@ export function PlanPanel({
       const res = await api.setSize(opts);
       setPlanning(res);
       setApproved(false); // size change invalidates prior approval
+      setEdited(true);
       setSizeConfirmed(true);
       onChange(await api.context());
     } catch (err) {
@@ -86,6 +91,7 @@ export function PlanPanel({
       const res = await run();
       setPlanning(res);
       setApproved(false);
+      setEdited(true);
       onChange(await api.context());
     } catch (err) {
       setError(err);
@@ -112,6 +118,7 @@ export function PlanPanel({
     try {
       await api.approve(planning.planHash);
       setApproved(true);
+      setEdited(false);
       onChange(await api.context());
     } catch (err) {
       setError(err);
@@ -156,6 +163,12 @@ export function PlanPanel({
       )}
 
       <ErrorPanel error={error} onDismiss={() => setError(null)} />
+
+      {planning && edited && !approved ? (
+        <div className="warnbox" style={{ marginTop: 10 }}>
+          Modifications done — waiting for approval to build.
+        </div>
+      ) : null}
 
       {planning ? (
         <PlanPreview
@@ -239,13 +252,19 @@ function PlanPreview({
 
       <ReviseChat busy={busy === 'revise'} onSend={onRevise} />
 
-      <BoardHierarchy
-        plan={plan}
-        busy={busy}
-        dims={validation.availableDimensions}
-        measures={validation.availableMeasures}
-        onUpdateWorksheetFormat={onUpdateWorksheetFormat}
-      />
+      <Collapsible
+        title="Sheets & dashboards"
+        badge={plan.worksheets.length + (plan.dashboards?.length ?? 0)}
+        defaultOpen
+      >
+        <BoardHierarchy
+          plan={plan}
+          busy={busy}
+          dims={validation.availableDimensions}
+          measures={validation.availableMeasures}
+          onUpdateWorksheetFormat={onUpdateWorksheetFormat}
+        />
+      </Collapsible>
 
       {plan.filters.length ? (
         <div className="small muted">Filters: {plan.filters.map((f) => `${f.field} ${f.operator}`).join(', ')}</div>
@@ -620,7 +639,7 @@ function BoardHierarchy({
           <div
             className="board"
             key={`${board.name}-${bi}`}
-            style={{ border: '1px solid #2a2a2a', borderRadius: 8, padding: 10, marginBottom: 10 }}
+            style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, marginBottom: 10 }}
           >
             <div className="title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span aria-hidden style={{ fontSize: 16 }}>🗂️</span>
@@ -629,7 +648,7 @@ function BoardHierarchy({
                 {all.length} sheet{all.length === 1 ? '' : 's'}
               </span>
             </div>
-            <div style={{ marginTop: 8, marginLeft: 8, borderLeft: '2px solid #333', paddingLeft: 10 }}>
+            <div style={{ marginTop: 8, marginLeft: 8, borderLeft: '2px solid var(--border)', paddingLeft: 10 }}>
               {all.map((ws) => (
                 <WorksheetNode key={ws.name} ws={ws} busy={busy} dims={dims} measures={measures} onApply={onUpdateWorksheetFormat} />
               ))}

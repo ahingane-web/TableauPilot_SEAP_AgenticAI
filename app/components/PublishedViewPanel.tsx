@@ -41,8 +41,17 @@ export function PublishedViewPanel({ ctx }: { ctx: SessionContext }): React.Reac
   const [error, setError] = useState<string | null>(null);
   const [instruction, setInstruction] = useState('');
   const [revising, setRevising] = useState(false);
+  // UI-only: shows a transient confirmation banner after a successful in-place republish.
+  const [modifySuccess, setModifySuccess] = useState(false);
 
   const hasWorkbook = Boolean(ctx.workbook);
+
+  // Auto-dismiss the post-modification confirmation banner.
+  useEffect(() => {
+    if (!modifySuccess) return;
+    const t = setTimeout(() => setModifySuccess(false), 4000);
+    return () => clearTimeout(t);
+  }, [modifySuccess]);
 
   async function open(): Promise<void> {
     setError(null);
@@ -71,11 +80,13 @@ export function PublishedViewPanel({ ctx }: { ctx: SessionContext }): React.Reac
     const ask = instruction.trim();
     if (!ask) return;
     setError(null);
+    setModifySuccess(false);
     setRevising(true);
     try {
       await api.revisePublished(ask);
       setInstruction('');
       await open(); // reload the embed to reflect the republished workbook
+      setModifySuccess(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setStatus('error');
@@ -175,6 +186,14 @@ export function PublishedViewPanel({ ctx }: { ctx: SessionContext }): React.Reac
           <button onClick={() => void modify()} disabled={revising || !instruction.trim()}>
             {revising ? <Busy label="Applying…" /> : 'Apply change'}
           </button>
+        </div>
+      ) : null}
+
+      {modifySuccess ? (
+        <div className="embed-header" style={{ paddingTop: 0, paddingBottom: 10, border: 'none' }}>
+          <div className="success" style={{ flex: 1 }}>
+            Modification done and dashboard published successfully.
+          </div>
         </div>
       ) : null}
 

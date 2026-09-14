@@ -1,7 +1,7 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-09-13.
+> Newest entries at the top of the change log. Last updated: 2026-09-14.
 
 ## Environment facts
 
@@ -23,7 +23,74 @@
   below). Code path is complete; Tableau Cloud rejects the generated workbook.
 - Phase 15 (Salesforce connector datasource builder): ✅ build + publish work; see the
   newest entry below.
-- Tests: **190 unit/integration passing**; `tsc`/lint/build clean.
+- Tests: **193 unit/integration passing**; `tsc`/lint/build clean.
+
+## Fix: relationship datasource showed "Migrated Data" (newest first)
+
+- **2026-09-14 — RESOLVED & user-verified.** After adding the object-model manifest (below), a
+  multi-object **relationship** build now opens in Tableau as the correct related tables (noodle)
+  — the user confirmed it "works perfectly fine with relationship build." The manifest was the
+  real fix; the older 2026-09-13 refresh-collapse caveat has NOT recurred in practice, so the
+  post-publish refresh is left running for all builds (no logic change).
+- **2026-09-14 — Missing object-model manifest made extracts load as legacy.** A multi-object
+  **relationship** Salesforce datasource opened in Tableau as a single **"Migrated Data"**
+  table instead of related tables. Root cause: the generated `.tds`
+  ([src/tableau/authoring/tdsGenerator.ts](../src/tableau/authoring/tdsGenerator.ts)) omitted
+  the `<document-format-change-manifest>` that BOTH working references carry
+  (`reference/sample_datasource_DataModelling.tds` and the embedded `.tds` in
+  `reference/Salesforce_Account_DS.tdsx`). Without `<ObjectModelExtractV2 />` +
+  `<ObjectModelEncapsulateLegacy />` (+ `ObjectModelTableType`, `SchemaViewerObjectModel`, and
+  — relationships only — `ObjectModelRelationshipPerfOptions`), Tableau loads the extract in
+  **legacy** mode and flattens the `<object-graph>` into one "Migrated Data" table. The rest of
+  the path was already correct: schema defaults `mode` to `relationship`, the route/orchestrator
+  pass it through, and the Python sidecar builds a genuine multi-table `Extract."<Object>"` hyper.
+  - **Fix:** added a `documentFormatChangeManifestXml(relationshipPerf)` helper emitted as the
+    FIRST child of `<datasource>` in all three generators (`generateSalesforceTds`,
+    `generateSalesforceRelationshipsTds` [perf flag on], `generateSalesforcePhysicalJoinTds`).
+    Also aligned element order to the references: `<aliases enabled='yes' />` now sits right
+    after `</connection>` (before `<column>`s/`<extract>`/`<object-graph>`).
+  - **Not the cause (left as-is):** `server-oauth='server-custom'` (matches the published
+    reference) and the minimal `<extract>`/`<connection>` attribute set.
+  - **Tests:** extended [tests/unit/tdsGenerator.test.ts](../tests/unit/tdsGenerator.test.ts)
+    with manifest-present + manifest-precedes-connection + aliases-before-extract guards for all
+    three generators (+3 cases).
+
+## Feature: Light "Tableau" UI revamp (newest first)
+
+Look-&-feel + UX pass over the SPA (`app/**`) with **no logic changes** — all `api.*`
+calls, state transitions, approval gating, and build/publish/modify flows are byte-for-byte
+unchanged. This was a CSS + presentational-component pass only.
+
+- **2026-09-14 — Light theme + UX affordances.**
+  - **Theme (`app/styles.css`):** replaced the dark palette with a light Tableau theme,
+    keeping the SAME CSS variable and class names so JSX needed no churn. New surfaces
+    (`--bg:#eef1f6`, `--panel:#fff`, `--panel-2:#f4f6fa`, `--border:#dbe1ea`,
+    `--text:#1b2733`, `--muted:#5b6b7f`) and Tableau accents (`--accent:#1f77b4`,
+    `--accent-2:#f28e2b`, `--ok:#2e9e5b`, `--warn:#d9822b`, `--danger:#e15759`). Added soft
+    panel shadows, blue focus rings, hover states, light tints for `.success/.warnbox/.error`
+    and the pills/steps/badges, and a new `.collapse` block for the show/hide sections.
+  - **Reusable `Collapsible` (`app/components/common.tsx`):** presentational header (accent
+    dot, title, optional count badge, chevron, Show/Hide) that toggles its children via local
+    `useState`.
+  - **Datasource fields (`SetupPanel.tsx`):** the Dimensions/Measures/Dates `FieldPills` are
+    wrapped in `Collapsible` ("Datasource fields", field-count badge, **default collapsed**).
+    The inline `#eef6ff` notice now uses the themed `.sf-note` class. `FieldPills` and
+    metadata loading untouched.
+  - **Sheets & dashboards (`PlanPanel.tsx`):** `BoardHierarchy` wrapped in `Collapsible`
+    ("Sheets & dashboards", default open); hardcoded dark inline borders (`#2a2a2a`, `#333`)
+    → `var(--border)`. Color-picker defaults left as-is (they are dashboard data). Added a
+    UI-only `edited` flag → `.warnbox` banner **"Modifications done — waiting for approval to
+    build."** shown when a plan is revised/edited and not yet re-approved (cleared on
+    generate/approve).
+  - **Post-publish modify (`PublishedViewPanel.tsx`):** UI-only `modifySuccess` flag → a
+    transient (auto-dismiss 4s) `.success` banner **"Modification done and dashboard published
+    successfully."** after `modify()` republishes + reloads. Republish/reload logic unchanged.
+  - **Dashboard pane toggle (`App.tsx`):** new `showDashboard` state + topbar "Hide/Show
+    dashboard" button. When hidden, the `.gutter` + `.right` pane are not rendered and the
+    `.left` workflow pane expands full width; drag/splitter is only wired when shown.
+  - **Verify:** `tsc`, ESLint, and the full **190** tests pass (the 2 Hyper-sidecar tests only
+    fail inside the network sandbox because the Hyper binary can't spawn there; they pass
+    normally).
 
 ## Feature: Salesforce connector — extract datasource builder (newest first)
 

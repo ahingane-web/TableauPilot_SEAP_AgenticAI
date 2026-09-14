@@ -1,7 +1,7 @@
 # Design — TableauPilot AI
 
 > Living document. Update this whenever module interfaces, schemas, algorithms, or
-> code-level decisions change. Last updated: 2026-09-13.
+> code-level decisions change. Last updated: 2026-09-14.
 
 This is the module-level design. For the big picture see
 [architecture.md](./architecture.md); for binding rules see [rules.md](./rules.md).
@@ -154,6 +154,14 @@ sign-in: `generatePkce`/`generateState`, `buildAuthorizeUrl`, `exchangeCodeForTo
 `fetchUserInfo`, `sessionFromToken`; `oauthStore` holds pending PKCE state (swept).
 
 **TDS generation (`src/tableau/authoring/tdsGenerator.ts`)**:
+- **All generators emit a `<document-format-change-manifest>` as the first child of
+  `<datasource>`** (`documentFormatChangeManifestXml()`): `ObjectModelEncapsulateLegacy`,
+  `ObjectModelExtractV2`, `ObjectModelTableType`, `SchemaViewerObjectModel`,
+  `VConnDownstreamExtractsWithWarnings`, plus `ObjectModelRelationshipPerfOptions` for the
+  relationships model. This is REQUIRED: without it Tableau loads an extract-backed datasource
+  in legacy mode and collapses the object-graph into one "Migrated Data" table. Element order
+  mirrors the references: manifest → `<connection>` → `<aliases enabled='yes'/>` → `<column>`s
+  → `<extract>` → `<object-graph>`.
 - `generateSalesforceTds()` — single-object extract `.tds`.
 - `generateSalesforceRelationshipsTds()` — multi-object **relationships** model: a
   connection-level `<relation type='collection'>` of the objects, an `<object-graph>`
@@ -255,6 +263,21 @@ optional JWT. `SetupPanel` hosts the **Salesforce data-source builder** (`Salesf
 a "combine multiple objects" toggle, and per-table relationship/join cards; it calls
 `api.salesforcePublish({ tables, relationships, mode, ... })`. Styles for it live in
 `app/styles.css` (`.sf*`, `.segmented`, `.switch`, `.tablecard`, `.joinrow`).
+
+**Theme & UX (light "Tableau" look).** `app/styles.css` is a light theme driven entirely by
+`:root` CSS variables (`--bg/--panel/--panel-2/--border/--text/--muted` neutrals + Tableau
+`--accent/--accent-2/--ok/--warn/--danger` accents); components reference the variables, so
+the palette is swappable without JSX changes. `common.tsx` exports a presentational
+`Collapsible` (header + chevron + count badge, toggles children via local `useState`) used to
+show/hide the **datasource fields** (`SetupPanel`, default collapsed) and the **sheets &
+dashboards** hierarchy (`PlanPanel`, default open). `App.tsx` has a topbar **Hide/Show
+dashboard** toggle (`showDashboard`) that drops the `.gutter` + `.right` pane so the workflow
+pane expands full-width (splitter/drag only wired while shown). Two UI-only status banners
+give post-modification feedback: `PlanPanel` shows a `.warnbox` **"Modifications done —
+waiting for approval to build"** when the plan is edited/revised and not yet re-approved, and
+`PublishedViewPanel` shows a transient `.success` **"Modification done and dashboard published
+successfully"** after an in-place republish. These are presentational only — no `api.*` call,
+approval-gating, or build/publish/modify logic changed.
 
 ## 10. Errors (`src/utils/errors.ts`)
 

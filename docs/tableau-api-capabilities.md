@@ -41,6 +41,14 @@ The Salesforce connector reads objects/fields (SOAP + REST), queries rows, and c
 `.hyper` extract (Python Hyper sidecar) packaged as a `.tdsx`, then publishes it via REST.
 After publish it embeds the saved Salesforce credential and triggers an extract refresh.
 
+**Required: the object-model manifest.** An extract-backed `.tds` MUST open with a
+`<document-format-change-manifest>` declaring `ObjectModelExtractV2` +
+`ObjectModelEncapsulateLegacy` (plus `ObjectModelTableType`, `SchemaViewerObjectModel`, and —
+for the relationships model — `ObjectModelRelationshipPerfOptions`). Omitting it makes Tableau
+load the extract in **legacy** mode and flatten the multi-table `<object-graph>` into a single
+**"Migrated Data"** table (so a "relationship" build renders as one merged table). Both working
+references carry this block; the generators now emit it for every mode.
+
 **Why build the `.hyper` locally?** Server-side extract creation from a live datasource
 was tried and failed on the target Cloud site — `createExtract` returns *"REST API does
 not support background job type :create_extracts"*, and constraining the query via `.tds`

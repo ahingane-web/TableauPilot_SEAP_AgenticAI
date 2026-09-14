@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ApiError } from '../api';
 import type { SanitizedError } from '../types';
 
@@ -41,5 +41,42 @@ export function Busy({ label }: { label: string }): React.ReactElement {
     <span className="muted small">
       <span className="spin" /> {label}
     </span>
+  );
+}
+
+/**
+ * Collapsible show/hide section. Purely presentational: a clickable header (accent dot,
+ * title, optional count badge, chevron) that toggles the visibility of its children.
+ * Used to keep dense sections (datasource fields, sheets & dashboards) tidy.
+ */
+export function Collapsible({
+  title,
+  badge,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  badge?: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}): React.ReactElement {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="collapse">
+      <button
+        type="button"
+        className={`head${open ? ' open' : ''}`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="accent" aria-hidden />
+        <span className="chev" aria-hidden>▶</span>
+        <span>{title}</span>
+        {badge != null ? <span className="badge">{badge}</span> : null}
+        <span className="spacer" />
+        <span className="small muted">{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open ? <div className="body">{children}</div> : null}
+    </div>
   );
 }

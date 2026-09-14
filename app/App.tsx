@@ -22,6 +22,9 @@ export function App(): React.ReactElement {
   const layoutRef = useRef<HTMLDivElement | null>(null);
   const [leftWidth, setLeftWidth] = useState<number | null>(null);
   const [dragging, setDragging] = useState(false);
+  // Show/hide the right-hand published-dashboard pane. When hidden, the workflow pane
+  // expands to the full width and the splitter/drag behavior is disabled.
+  const [showDashboard, setShowDashboard] = useState(true);
 
   useEffect(() => {
     if (!dragging) return;
@@ -91,6 +94,9 @@ export function App(): React.ReactElement {
           <>
             <span className="badge">{ctx.username}</span>
             <span className={`badge ${ctx.connected ? 'ok' : 'off'}`}>{ctx.connected ? 'Tableau connected' : 'not connected'}</span>
+            <button className="ghost" onClick={() => setShowDashboard((v) => !v)}>
+              {showDashboard ? 'Hide dashboard' : 'Show dashboard'}
+            </button>
             <button className="ghost" onClick={logout}>
               Lock vault
             </button>
@@ -101,7 +107,16 @@ export function App(): React.ReactElement {
       </div>
 
       <div className="layout" ref={layoutRef}>
-        <div className="left" style={leftWidth != null ? { width: leftWidth, minWidth: 0 } : undefined}>
+        <div
+          className="left"
+          style={
+            !showDashboard
+              ? { width: '100%', minWidth: 0 }
+              : leftWidth != null
+                ? { width: leftWidth, minWidth: 0 }
+                : undefined
+          }
+        >
           {booting ? (
             <div className="panel">Loading…</div>
           ) : !ctx || !ctx.hasCredentials ? (
@@ -114,21 +129,25 @@ export function App(): React.ReactElement {
             </>
           )}
         </div>
-        <div
-          className={`gutter${dragging ? ' dragging' : ''}`}
-          onMouseDown={() => setDragging(true)}
-          onDoubleClick={() => setLeftWidth(null)}
-          role="separator"
-          aria-orientation="vertical"
-          title="Drag to resize — double-click to reset"
-        />
-        <div className="right">
-          {ctx ? (
-            <PublishedViewPanel ctx={ctx} key={lastResult?.workbookId ?? ctx.workbook?.workbookId ?? 'none'} />
-          ) : (
-            <div className="embed-empty">Unlock your vault to begin.</div>
-          )}
-        </div>
+        {showDashboard ? (
+          <>
+            <div
+              className={`gutter${dragging ? ' dragging' : ''}`}
+              onMouseDown={() => setDragging(true)}
+              onDoubleClick={() => setLeftWidth(null)}
+              role="separator"
+              aria-orientation="vertical"
+              title="Drag to resize — double-click to reset"
+            />
+            <div className="right">
+              {ctx ? (
+                <PublishedViewPanel ctx={ctx} key={lastResult?.workbookId ?? ctx.workbook?.workbookId ?? 'none'} />
+              ) : (
+                <div className="embed-empty">Unlock your vault to begin.</div>
+              )}
+            </div>
+          </>
+        ) : null}
       </div>
     </div>
   );

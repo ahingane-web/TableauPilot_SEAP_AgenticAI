@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import type { DatasourceMetadataView, NamedItem, SessionContext } from '../types';
-import { Busy, ErrorPanel } from './common';
+import { Busy, ErrorPanel, Collapsible } from './common';
 
 /** Relationship cardinality options shown in the relationship builder. */
 type SfCardinality = 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
@@ -305,16 +305,20 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                   {metadata.unavailableReason}
                 </div>
               ) : null}
-              <FieldPills title="Dimensions" cls="dim" fields={metadata.dimensions.map((f) => f.name)} />
-              <FieldPills title="Measures" cls="mea" fields={metadata.measures.map((f) => f.name)} />
-              <FieldPills title="Dates" cls="date" fields={metadata.dates.map((f) => f.name)} />
+              {metadata.metadataApiAvailable ? (
+                <Collapsible title="Datasource fields" badge={metadata.fieldCount} defaultOpen={false}>
+                  <FieldPills title="Dimensions" cls="dim" fields={metadata.dimensions.map((f) => f.name)} />
+                  <FieldPills title="Measures" cls="mea" fields={metadata.measures.map((f) => f.name)} />
+                  <FieldPills title="Dates" cls="date" fields={metadata.dates.map((f) => f.name)} />
+                </Collapsible>
+              ) : null}
             </div>
           ) : null}
         </div>
       )}
 
       {notice ? (
-        <div className="small" style={{ marginTop: 8, padding: 8, borderRadius: 6, background: '#eef6ff' }}>
+        <div className="sf-note small" style={{ marginTop: 8 }}>
           {notice}
           <button className="link" style={{ marginLeft: 8 }} onClick={() => setNotice(null)}>
             dismiss

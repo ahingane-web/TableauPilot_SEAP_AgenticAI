@@ -37,6 +37,18 @@ describe('generateSalesforceTds', () => {
     expect(tds).toContain('</datasource>');
   });
 
+  it('emits the object-model manifest as the first <datasource> child (avoids legacy "Migrated Data")', () => {
+    expect(tds).toContain('<document-format-change-manifest>');
+    expect(tds).toContain('<ObjectModelExtractV2 />');
+    expect(tds).toContain('<ObjectModelEncapsulateLegacy />');
+    expect(tds).toContain('<ObjectModelTableType />');
+    expect(tds).toContain('<SchemaViewerObjectModel />');
+    // The manifest MUST precede the <connection> (Tableau reads it to pick the object model).
+    expect(tds.indexOf('<document-format-change-manifest>')).toBeLessThan(tds.indexOf("<connection class='federated'>"));
+    // Single-object model does NOT carry the relationships perf flag.
+    expect(tds).not.toContain('<ObjectModelRelationshipPerfOptions />');
+  });
+
   it('mirrors the reference Salesforce OAuth connection block (default mode)', () => {
     expect(tds).toContain("<connection class='federated'>");
     expect(tds).toContain("class='salesforce'");
@@ -184,6 +196,8 @@ describe('generateSalesforceTds', () => {
     // the <extract object-id=...> uses the bare (unbracketed) id; metadata keeps brackets
     expect(withExtract).toContain('<object-id>[Contact (Contact)_');
     expect(withExtract).not.toContain("object-id='[Contact");
+    // <aliases> is emitted after </connection> and BEFORE the <extract> (reference order).
+    expect(withExtract.indexOf("<aliases enabled='yes' />")).toBeLessThan(withExtract.indexOf('<extract'));
   });
 
   it('emits no <column> elements when no fields are provided (bare live datasource)', () => {
@@ -251,6 +265,22 @@ describe('generateSalesforceRelationshipsTds', () => {
       { leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId', cardinality: 'one-to-many' },
     ],
     extract: { hyperDbname: 'Data/Extracts/federated_rel.hyper' },
+  });
+
+  it('emits the object-model manifest (with relationships perf flag) before the connection', () => {
+    // Regression guard for the relationship-vs-"Migrated Data" bug: without this manifest
+    // Tableau loads the extract in legacy mode and flattens the object-graph into one table.
+    expect(rel).toContain('<document-format-change-manifest>');
+    expect(rel).toContain('<ObjectModelExtractV2 />');
+    expect(rel).toContain('<ObjectModelEncapsulateLegacy />');
+    expect(rel).toContain('<ObjectModelRelationshipPerfOptions />');
+    expect(rel).toContain('<ObjectModelTableType />');
+    expect(rel).toContain('<SchemaViewerObjectModel />');
+    expect(rel.indexOf('<document-format-change-manifest>')).toBeLessThan(rel.indexOf("<connection class='federated'>"));
+    // Both the manifest AND the object-graph are present (a true relationship model).
+    expect(rel).toContain('<object-graph>');
+    // <aliases> precedes the <extract> (reference element order).
+    expect(rel.indexOf("<aliases enabled='yes' />")).toBeLessThan(rel.indexOf('<extract'));
   });
 
   it('wraps the physical tables in a <relation type=collection>', () => {
@@ -401,6 +431,19 @@ describe('generateSalesforcePhysicalJoinTds', () => {
       { leftObject: 'Account', leftField: 'Id', rightObject: 'Contact', rightField: 'AccountId', joinType: 'inner' },
     ],
     extract: { hyperDbname: 'Data/Extracts/federated_join.hyper' },
+  });
+
+  it('emits the object-model manifest before the connection (no relationships perf flag)', () => {
+    expect(join).toContain('<document-format-change-manifest>');
+    expect(join).toContain('<ObjectModelExtractV2 />');
+    expect(join).toContain('<ObjectModelEncapsulateLegacy />');
+    expect(join).toContain('<ObjectModelTableType />');
+    expect(join).toContain('<SchemaViewerObjectModel />');
+    expect(join.indexOf('<document-format-change-manifest>')).toBeLessThan(join.indexOf("<connection class='federated'>"));
+    // A physical join is not the relationships model, so it omits the perf flag.
+    expect(join).not.toContain('<ObjectModelRelationshipPerfOptions />');
+    // <aliases> precedes the <extract> (reference element order).
+    expect(join.indexOf("<aliases enabled='yes' />")).toBeLessThan(join.indexOf('<extract'));
   });
 
   it('emits a left-deep <relation type=join> tree over the LIVE tables (no collection)', () => {

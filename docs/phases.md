@@ -85,7 +85,7 @@ publish events captured.
 ## Phase 14 — Testing ✅
 **Produces:** `tests/unit/*`, `tests/integration/*`, `tests/e2e/*`, fixtures.
 **Done when:** unit + integration (Vitest) and non-destructive E2E (Playwright) pass;
-`tsc`/lint/build clean. Current: **190 unit/integration passing**.
+`tsc`/lint/build clean. Current: **193 unit/integration passing**.
 
 ## Phase 15 — Salesforce connector: extract datasource builder ✅
 **Produces:** `src/salesforce/{client,oauth,oauthStore}.ts`,
@@ -96,9 +96,11 @@ routes, and the `SalesforceBuild` wizard in `app/components/SetupPanel.tsx`.
 **Done when:** connect (username/password or OAuth) → model one/many objects
 (relationship or physical-join) → generate `.tds` + local `.hyper`/`.tdsx` (Python Hyper
 sidecar) → publish → embed saved Salesforce credential → trigger extract refresh. Single-
-and multi-object builds work; **190 tests passing**; `tsc`/lint clean.
-**Note:** multi-object server-side refresh can rebuild/collapse the extract — see the
-newest [memory.md](./memory.md) entry.
+and multi-object builds work; **193 tests passing**; `tsc`/lint clean.
+**Note:** the generated `.tds` must carry the object-model `<document-format-change-manifest>`
+or Tableau loads the extract in legacy mode and shows one "Migrated Data" table. Added
+2026-09-14 and **user-verified**: multi-object relationship builds now render the correct
+related tables. See the 2026-09-14 [memory.md](./memory.md) entry.
 
 ---
 
