@@ -11,6 +11,7 @@ vault** and never reach the browser or the LLM.
 > **Hybrid authoring:** AI plan → server-side `.twb` generation → REST publish → embedded
 > **real** Web Authoring → REST verification. No fake editor, no fabricated success.
 
+- **Project overview (start here):** [PROJECT_OVERVIEW.md](./PROJECT_OVERVIEW.md) — plain-language tour + end-to-end flow (diagrams: [docs/diagrams.html](./docs/diagrams.html))
 - **Product requirements:** [docs/prd.md](./docs/prd.md)
 - **Architecture:** [docs/architecture.md](./docs/architecture.md)
 - **Detailed design:** [docs/design.md](./docs/design.md)

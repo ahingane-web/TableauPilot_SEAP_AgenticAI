@@ -1,7 +1,7 @@
 # Engineering & AI Rules — TableauPilot AI
 
 > **Binding** rules for anyone (human or AI) working in this repo. Update this whenever
-> an invariant, convention, or constraint changes. Last updated: 2026-09-14.
+> an invariant, convention, or constraint changes. Last updated: 2026-09-22.
 
 ## 1. Tech to use / avoid
 
@@ -16,8 +16,8 @@
 
 **Avoid**
 - **No Python except the one sanctioned Hyper sidecar** (`scripts/hyper/build_tdsx.py`,
-  used only to materialize Salesforce `.hyper` extracts — the Hyper API has no Node
-  binding). Do not spread Python anywhere else (see
+  used only to materialize the Build-datasource connectors' `.hyper` extracts (Salesforce
+  and Excel) — the Hyper API has no Node binding). Do not spread Python anywhere else (see
   [python-dependency-decision.md](./python-dependency-decision.md)).
 - **No fake authoring** — do not simulate shelf/mark/filter edits via the Embedding JS
   API; Tableau does not support it (see [authoring-limitations.md](./authoring-limitations.md)).
@@ -47,6 +47,10 @@
    transiently in-memory (`session.connectors.salesforce`) only to read schema/data, then
    cleared. Published datasources authenticate via the saved Salesforce credential on
    Tableau Cloud. Multi-object `.tds` field names are qualified `[Object.Field]`.
+10. **The conversational copilot stays in scope.** `tableauPilotAgent` only assists with
+    this product (Tableau dashboards, the locked datasource/fields, the Salesforce/Excel
+    connector builds, and the app workflow); it politely declines and redirects off-topic
+    requests (general knowledge, unrelated code, chit-chat) rather than answering them.
 
 ## 3. Security rules
 

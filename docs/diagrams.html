@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TableauPilot AI — Diagrams</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f1420;
+      color: #e6e9ef;
+      line-height: 1.5;
+    }
+    header {
+      padding: 20px 24px;
+      border-bottom: 1px solid #232a3a;
+      position: sticky; top: 0; background: #0f1420; z-index: 5;
+    }
+    header h1 { margin: 0 0 4px; font-size: 18px; }
+    header p { margin: 0; font-size: 13px; color: #9aa4b8; }
+    nav { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    nav a {
+      font-size: 12px; text-decoration: none; color: #cdd5e6;
+      border: 1px solid #2a3245; padding: 5px 10px; border-radius: 999px; background: #161c29;
+    }
+    nav a:hover { border-color: #3d82f6; color: #fff; }
+    main { max-width: 1100px; margin: 0 auto; padding: 24px; }
+    section { margin: 8px 0 40px; }
+    h2 { font-size: 16px; margin: 0 0 4px; }
+    .sub { font-size: 13px; color: #9aa4b8; margin: 0 0 14px; }
+    .card {
+      background: #131a27; border: 1px solid #232a3a; border-radius: 12px;
+      padding: 16px; overflow: auto;
+    }
+    .mermaid { display: flex; justify-content: center; }
+    footer { padding: 24px; text-align: center; color: #6b7488; font-size: 12px; }
+    code { background: #1b2333; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TableauPilot AI — Diagrams</h1>
+    <p>Open this file in any browser. Diagrams render client-side via Mermaid (CDN). Right-click a diagram to save the SVG.</p>
+    <nav>
+      <a href="#architecture">1. System architecture</a>
+      <a href="#dashboard">2. Dashboard flow (end to end)</a>
+      <a href="#connector">3. Connector build flow</a>
+    </nav>
+  </header>
+
+  <main>
+    <section id="architecture">
+      <h2>1. System architecture</h2>
+      <p class="sub">The BFF model: the browser holds only an opaque <code>x-session-id</code>; all secrets and external calls live server-side.</p>
+      <div class="card">
+        <pre class="mermaid">
+flowchart TB
+    subgraph browser [Browser SPA - React / Vite]
+        UI["SetupPanel / PlanPanel / PublishedViewPanel"]
+        Embed["Real Web Authoring embed"]
+    end
+
+    subgraph server [Node server - Hono BFF]
+        Routes["/api routes (app.ts)"]
+        Vault["PIN Vault + in-memory Session"]
+        Svc["TableauService orchestrator"]
+        Agents["Mastra agents + tools + workflow"]
+        Authoring[".twb / .tds generation"]
+        Hyper["Python Hyper sidecar"]
+    end
+
+    subgraph ext [External services]
+        Tableau["Tableau Cloud (REST + Metadata)"]
+        LLM["LLM gateway (Anthropic / OpenRouter)"]
+        SF["Salesforce API"]
+    end
+
+    UI -->|"x-session-id only"| Routes
+    Embed -->|"embed JWT"| Tableau
+    Routes --> Vault
+    Routes --> Svc
+    Routes --> Agents
+    Agents --> LLM
+    Agents --> Authoring
+    Svc --> Authoring
+    Svc --> Hyper
+    Authoring --> Tableau
+    Svc --> Tableau
+    Svc --> SF
+        </pre>
+      </div>
+    </section>
+
+    <section id="dashboard">
+      <h2>2. Dashboard flow (end to end)</h2>
+      <p class="sub">From unlocking the vault to a verified, published dashboard you refine in the real embed.</p>
+      <div class="card">
+        <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor User
+    participant SPA as Browser SPA
+    participant BFF as Hono BFF
+    participant Vault as PIN Vault + Session
+    participant Agent as Mastra Agent + Workflow
+    participant LLM as LLM Gateway
+    participant Tableau as Tableau Cloud
+
+    Note over User,Vault: A. Identity and secrets
+    User->>SPA: Enter username + 6-digit PIN
+    SPA->>BFF: POST /api/vault/unlock
+    BFF->>Vault: Derive key, decrypt creds into session
+    Vault-->>BFF: sessionId (opaque)
+    BFF-->>SPA: sessionId
+
+    Note over User,Tableau: B. Connect and lock a datasource
+    SPA->>BFF: POST /api/tableau/connect
+    BFF->>Tableau: REST sign-in with PAT
+    SPA->>BFF: GET projects and datasources
+    User->>SPA: Pick project + datasource
+    SPA->>BFF: select-project and lock-datasource
+    BFF->>Tableau: Fetch datasource metadata (real fields)
+    BFF-->>SPA: Locked datasource + field list
+
+    Note over User,LLM: C. Plan (AI) and approve
+    User->>SPA: Describe the dashboard
+    SPA->>BFF: POST /api/dashboard/plan
+    BFF->>Agent: Plan against real fields
+    Agent->>LLM: Prompt with field metadata
+    LLM-->>Agent: Draft plan
+    Agent-->>BFF: Zod-validated DashboardPlan
+    BFF-->>SPA: Plan for review
+    User->>SPA: Approve
+    SPA->>BFF: POST /api/dashboard/approve
+
+    Note over BFF,Tableau: D. Execute, publish, verify
+    SPA->>BFF: POST /api/dashboard/execute
+    BFF->>Agent: Generate .twb from plan
+    Agent->>Tableau: Publish workbook (REST)
+    Agent->>Tableau: Verify it exists (REST/Metadata)
+    Tableau-->>Agent: Real workbook id + URL
+    Agent-->>BFF: Verified result
+    BFF-->>SPA: Real Tableau URL
+
+    Note over User,Tableau: E. Refine in the real embed
+    SPA->>BFF: GET /api/embed/info
+    BFF-->>SPA: Short-lived embed JWT or interactive login
+    User->>SPA: Edit in Web Authoring embed
+    SPA-->>User: WorkbookPublished events on save
+        </pre>
+      </div>
+    </section>
+
+    <section id="connector">
+      <h2>3. Connector build flow (Salesforce / Excel)</h2>
+      <p class="sub">Building an extract-backed datasource, then rejoining the dashboard flow above.</p>
+      <div class="card">
+        <pre class="mermaid">
+flowchart TB
+    Start(["Build datasource in SetupPanel"]) --> Pick{"Which connector?"}
+    Pick -->|Salesforce| SFconn["connect - list objects"]
+    Pick -->|Excel| XLupload["upload .xlsx - parse sheets"]
+    SFconn --> Model["DataModelBuilder - relationships or joins"]
+    XLupload --> Model
+    Model --> Tds["Generate .tds (tdsGenerator / excelTdsGenerator)"]
+    Tds --> HyperBuild["Materialize .hyper (Python sidecar)"]
+    HyperBuild --> Publish["Publish .tdsx (publishing/datasource.ts)"]
+    Publish --> Branch{"Connector?"}
+    Branch -->|Salesforce| Cred["Embed saved OAuth credential -> refresh extract"]
+    Branch -->|Excel| Static["Extract-only: no credential, no refresh"]
+    Cred --> Lock["Lock published datasource"]
+    Static --> Lock
+    Lock --> Done(["Continue to dashboard flow"])
+        </pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>Generated for TableauPilot AI. See <code>PROJECT_OVERVIEW.md</code> and <code>docs/architecture.md</code>.</footer>
+
+  <script type="module">
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose' });
+  </script>
+</body>
+</html>

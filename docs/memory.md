@@ -1,9 +1,35 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-09-14.
+> Newest entries at the top of the change log. Last updated: 2026-09-22.
 
 ## Feature: Excel connector (Build datasource) (newest first)
+
+- **2026-09-22 — Docs sync for the scope guardrail + overview.** Added Hard Invariant 10 to
+  [rules.md](./rules.md) (the copilot stays in scope / declines off-topic requests), corrected
+  the Python-sidecar rule to note it serves **both** Salesforce and Excel extracts, bumped
+  `rules.md` `Last updated`, and linked `PROJECT_OVERVIEW.md` + `docs/diagrams.html` from the
+  README doc index. Docs-only.
+
+- **2026-09-17 — Added an on-topic scope guardrail to `tableauPilotAgent`.** New CORE RULE 8
+  in [src/agents/tableauPilotAgent.ts](../src/agents/tableauPilotAgent.ts): the copilot only
+  assists with this product (Tableau dashboards, the locked datasource/fields, Salesforce/Excel
+  connector builds, and the app workflow) and politely declines + redirects off-topic requests
+  (general knowledge, unrelated code, chit-chat) in one sentence. Only the conversational agent
+  is affected; `dashboardPlannerAgent`/`calculationEngineerAgent` are tool-less/structured and
+  unchanged. No connector logic changed.
+
+- **2026-09-16 — Added `PROJECT_OVERVIEW.md` (repo root).** Plain-language onboarding guide
+  that ties together the README + `docs/*` (what the project is, BFF architecture, the two
+  user flows, tech stack, repo layout, security model, run/test, key constraints). Includes
+  an **end-to-end flow** section: a Mermaid sequence diagram (vault -> connect/lock -> plan ->
+  approve -> execute/publish/verify -> embed refine) plus a code-tied step-by-step and a
+  connector build flow. Docs-only; no code changed.
+
+- **2026-09-16 — Added `docs/diagrams.html`.** Self-contained, browser-openable diagram viewer
+  (Mermaid via CDN, dark theme) rendering three diagrams: system architecture (BFF), the
+  end-to-end dashboard sequence, and the connector build flow. Open with `open docs/diagrams.html`.
+  Docs-only; no code changed.
 
 - **2026-09-14 — Completed Excel docs coverage.** Filled the docs that previously had no
   Excel mention: [security.md](./security.md) (in-memory parse, no credentials, extract-only,
