@@ -72,6 +72,30 @@ Honest boundaries:
   (`[A-Za-z][A-Za-z0-9_]*`) so they flow through the shared `.tds`/`.hyper` pipeline; the
   original names are preserved as captions/labels for display.
 
+## Google BigQuery datasources — honest scope
+
+The BigQuery connector publishes either a **Live** datasource (Tableau queries BigQuery
+directly over OAuth) or an **Extract** datasource (rows materialized into a bundled `.hyper`
+and refreshed on Tableau Cloud), from the selected tables with relationships or physical joins.
+Honest boundaries:
+
+- **Refreshability depends on a Tableau-Cloud saved credential.** Both shapes embed the
+  publisher's **saved Google BigQuery OAuth credential** (matched by email). If that saved
+  credential is missing/expired on Tableau Cloud, a Live datasource won't query and an Extract
+  refresh won't run — the app's own OAuth token is transient and is not what Tableau refreshes with.
+- **Extract row caps.** Extract mode caps each table at `HYPER_MAX_ROWS`; large tables are
+  truncated, not fully mirrored. Live mode has no cap (Tableau queries the source).
+- **Post-publish extract refresh is best-effort.** After an Extract publish the app triggers a
+  server-side "Update Data Source Now"; the bundled `.hyper` already holds data queried at publish
+  time even if the refresh can't start. (The same multi-table refresh caveat noted for Salesforce
+  may apply.)
+- **Unsupported column types are skipped.** `RECORD`/`STRUCT`/nested/`REPEATED` fields are not
+  modeled (scalar columns only). Real BigQuery column names (which may contain spaces/hyphens) are
+  preserved as the connection `remote-name` with disambiguated local names.
+- **GCP prerequisites.** Requires the user's own Google OAuth client, with the **BigQuery** and
+  **Cloud Resource Manager** APIs enabled and the callback registered as an Authorized redirect URI
+  (the connector's in-UI how-to walks through this).
+
 ## The honest hand-off
 
 For anything in Category C, TableauPilot:

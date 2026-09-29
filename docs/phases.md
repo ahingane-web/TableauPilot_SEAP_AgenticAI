@@ -117,6 +117,23 @@ converge on the normal dashboard flow. Single- and multi-sheet builds work; **21
 passing**; `tsc`/lint clean. **No Salesforce datasource logic changed** (only additive
 `export`s in `tdsGenerator.ts` and a shared-component extraction in `SetupPanel`).
 
+## Phase 17 — Google BigQuery connector: live + extract datasource builder ✅
+**Produces:** `src/bigquery/{oauth,oauthStore,client}.ts` (Google OAuth PKCE + BigQuery/Cloud
+Resource Manager REST), `src/tableau/authoring/bigqueryTdsGenerator.ts` (single / relationships
+/ physical-join `.tds`, live or extract, `class='bigquery'` OAuth connection, reconciled with
+`reference/BigQueryDataset{Live,Extract}.tds`), `TableauService.{bigQueryOauthStart,
+completeBigQueryOauth,bigQueryConnected,bigQueryListProjects,bigQueryListDatasets,
+bigQueryListTables,bigQueryDescribeTable,buildAndPublishBigQueryDatasource}`,
+`/api/connectors/bigquery/*` routes, `GOOGLE_OAUTH_*` config, `app/components/BigQueryBuild.tsx`
++ the connector dropdown, and `app/api.ts` `bigQuery*` methods.
+**Done when:** sign in with Google (OAuth popup) → pick Billing Project > Project > Dataset →
+list tables as "objects" → model one/many (relationship or join, identical UI) → choose Live or
+Extract → generate `.tds` (+ `.hyper`/`.tdsx` for extract) → publish (embed OAuth cred; refresh
+on extract only) → lock + converge on the normal dashboard flow. Single-/multi-table + live/
+extract builds work; **233 tests** (231 passing in-sandbox; 2 real-Hyper tests need
+`.venv-hyper`); `tsc`/lint clean. **No Salesforce or Excel connector logic changed** (only
+additive code).
+
 ---
 
 ## Active workstream

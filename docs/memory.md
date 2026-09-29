@@ -1,7 +1,116 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-09-22.
+> Newest entries at the top of the change log. Last updated: 2026-09-29.
+
+## Feature: Google BigQuery connector (Build datasource) (newest first)
+
+- **2026-09-29 — Docs sweep: BigQuery now covered across the full doc set.** Propagated the
+  connector into the remaining docs that still said "Salesforce and Excel": `security.md` (new
+  "Google BigQuery connector" section + threat-model item 1), `python-dependency-decision.md`
+  (sidecar serves BigQuery *extract*; Live skips it), `authoring-limitations.md` (BigQuery
+  Live/Extract honest scope), `PROJECT_OVERVIEW.md` (overview, connector list, build-flow steps,
+  repo layout, tech stack, security paragraph, constraints), and the README Hyper-sidecar line.
+  Text/docs-only; typecheck + lint clean.
+
+- **2026-09-29 — Live end-to-end verified + expanded the in-UI OAuth how-to.** Confirmed the full
+  flow works against a real Google account + GCP project (sign-in → email → projects → datasets →
+  tables). Expanded `BigQueryBuild`'s "How do I create a Google OAuth Client ID?" disclosure with
+  the exact GCP prerequisites surfaced during testing: (1) enable **BigQuery API + Cloud Resource
+  Manager API** (CRM was the last blocker — `403 … cloudresourcemanager … has not been used`),
+  (2) OAuth consent screen **User type = External** (Internal → `403 org_internal`; if locked,
+  use a personal "No organization" project), (3) add the account as a **Test user** or set
+  **Production** (Testing expires refresh tokens after 7 days), (4) first-time **"unverified app →
+  Advanced → Continue"** note. Text-only UI change; typecheck + lint clean.
+
+- **2026-09-29 — BigQuery OAuth client can be saved (encrypted) in the user's vault + in-UI
+  how-to.** Added `TableauCredentials.bigQueryOAuth {clientId, clientSecret?}` (+ summary fields),
+  `VaultService.saveBigQueryOAuthClient`/`getBigQueryOAuthClient` (re-encrypts the creds blob with
+  the session key, no PIN; preserves an existing secret on blank resubmit for the same id), and
+  routes `GET`/`POST /api/connectors/bigquery/oauth/client`. `bigQueryOauthStart` now resolves the
+  client **UI → vault → env**. `BigQueryBuild` prefills the client id from the vault, offers a
+  "Save to my vault" checkbox (default on, saved on sign-in), a collapsible **step-by-step how-to**
+  for creating a Google OAuth client, a "saved — leave blank to reuse" secret hint, and a
+  "Loaded from your vault" badge. Reverted the throwaway Tableau client id from `.env`. Email is
+  NOT asked — it comes from `userinfo`. Only the reusable client is vaulted; the access/refresh
+  token stays transient. 31 tests green (vault + BigQuery suites); typecheck + lint clean; no
+  Salesforce/Excel logic touched (only additive optional field on the shared `TableauCredentials`).
+
+- **2026-09-29 — Aligned BigQuery OAuth scopes with Tableau Desktop's own connector.**
+  Verified against the real authorize URL Tableau Desktop generates
+  (`client_id=414627074249.apps.googleusercontent.com` = Tableau's own registered client;
+  loopback `http://127.0.0.1:PORT/Callback` redirect; PKCE S256; `access_type=offline`). Changed
+  our project-listing scope from `cloud-platform.read-only` (broad "read all Cloud data") to
+  **`cloudplatformprojects.readonly`** (project listing only) in
+  [src/bigquery/oauth.ts](../src/bigquery/oauth.ts) `DEFAULT_SCOPES` — least privilege + matches
+  Tableau. `listProjects` still uses Cloud Resource Manager v1 `projects.list`, which
+  `cloudplatformprojects.readonly` authorizes. Confirms the Client ID is the APP identity
+  (registered once, not created at connect); we cannot reuse Tableau's client (redirect-uri
+  mismatch + no secret). typecheck + lint clean; no Salesforce/Excel changes.
+
+- **2026-09-29 — BigQuery OAuth client is now dynamic (UI-entered), not env-only.** The
+  backend already accepted a per-request `clientId`/`clientSecret` on `bigQueryOauthStart`
+  (falling back to `GOOGLE_OAUTH_*` only when absent). Wired the frontend to match: on mount
+  `BigQueryBuild` calls `api.connectors()` and reads the bigquery item's `oauthConfigured`
+  flag; when the server has NO client (`false`) it renders **Client ID (+ optional secret)**
+  inputs in the sign-in step and passes them to `bigQueryOauthStart`. Sign-in is disabled
+  until a Client ID is entered; the shown redirect URI must be registered on the Google OAuth
+  client. Credentials stay transient (pending state + `session.connectors.bigquery` for
+  refresh), never persisted/logged. `GOOGLE_OAUTH_*` is therefore OPTIONAL. typecheck + lint
+  clean. No Salesforce/Excel changes.
+
+- **2026-09-29 — Added Google BigQuery as a third "Build datasource" connector (OAuth,
+  Live + Extract).** Flow: `Build datasource > pick connector > Google BigQuery > Sign in with
+  Google (browser OAuth popup) > pick Billing Project > Project > Dataset > select table(s) >
+  Relationship or Join > choose Live or Extract > publish`. Tables play the exact role Salesforce
+  objects / Excel sheets play; the shared `DataModelBuilder` + publish/lock pipeline is REUSED.
+  **No Salesforce or Excel connector logic was changed** (only additive code + docs). Test count:
+  **233 tests** (210 → +23 BigQuery: 15 generator + 8 client; 231 pass in-sandbox, 2
+  real-Hyper tests need the local `.venv-hyper`).
+  - **OAuth:** [src/bigquery/oauth.ts](../src/bigquery/oauth.ts) +
+    [src/bigquery/oauthStore.ts](../src/bigquery/oauthStore.ts) — Google Authorization-Code + PKCE
+    (`accounts.google.com/o/oauth2/v2/auth` → `oauth2.googleapis.com/token` → userinfo), scopes
+    `openid email bigquery cloud-platform.read-only`, `access_type=offline`+`prompt=consent` for a
+    refresh token. A single-use `state`→pending map routes the header-less callback back to the
+    session; a 10-min TTL sweep is wired into `startSessionSweeper`. Mirrors the Salesforce OAuth
+    modules but kept independent.
+  - **REST client:** [src/bigquery/client.ts](../src/bigquery/client.ts) (pure `fetch`, no SDK) —
+    `listProjects` (Cloud Resource Manager), `listDatasets`/`listTables`/`describeTable`/`queryRows`
+    (BigQuery v2), token-typed value coercion for the Hyper sidecar (DATE→`YYYY-MM-DD`, DATETIME/
+    TIMESTAMP→`YYYY-MM-DDTHH:MM:SS`, TIMESTAMP epoch-seconds handled), BQ→Twb/Hyper type mappers,
+    and an identifier-safe-name helper. Nested/repeated columns are skipped. This is the ONLY
+    module that talks to Google; it never talks to Tableau.
+  - **TDS:** [src/tableau/authoring/bigqueryTdsGenerator.ts](../src/tableau/authoring/bigqueryTdsGenerator.ts)
+    reconciled 1:1 with `reference/BigQueryDataset{Live,Extract}.tds`: a `class='bigquery'` OAuth
+    named-connection (`CATALOG`/`EXECCATALOG`/`project`/`schema`/`server-oauth=''`) and
+    `[project.dataset].[table]` relations. Because BQ column names may contain spaces/hyphens, it
+    writes its OWN `<cols>`/`<metadata-records>`/`<column>`/`<object-graph>` — keeping the REAL name
+    as `remote-name`/`remote-alias` and a disambiguated `local-name` (`Region`→`Region (People)`),
+    reusing only the connector-agnostic cardinality/join-type semantics + `HyperColumnType`. **Live**
+    omits `<extract>` (+ ExtractV2 manifest flag) and only maps `context=''`; **Extract** adds the
+    `class='hyper'` extract over `Extract."<objectId>"` tables + a `context='extract'` object-graph
+    property. Single/relationships/physical-join variants supported.
+  - **Orchestration:** [src/tableau/index.ts](../src/tableau/index.ts) adds `bigQueryOauthStart`,
+    `completeBigQueryOauth`, `bigQueryConnected`, `bigQueryListProjects/Datasets/Tables`,
+    `bigQueryDescribeTable`, and `buildAndPublishBigQueryDatasource` (describe → for extract query
+    rows → generate TDS → publish `.tdsx` (extract) or bare `.tds` (live) with an embedded Google
+    OAuth credential → best-effort embed on the connection → **extract-only** `refreshDatasourceNow`
+    → lock + `bigQueryTablesToMetadata`). `listConnectors()` now returns salesforce/excel/bigquery.
+    A `bigQueryAuth` helper refreshes the access token when near expiry.
+  - **Schema/session:** [src/schemas/common.ts](../src/schemas/common.ts) adds `BigQueryBuildSchema`
+    (+ project/dataset/table/field/materialization schemas, looser grammar for spaced names, reusing
+    the shared cardinality/join enums + `isConnected`); `ConnectorState.bigquery` holds the
+    memory-only email + access/refresh token + OAuth client for the flow.
+  - **Routes/env:** `POST /api/connectors/bigquery/oauth/start`, `GET …/oauth/callback`,
+    `GET …/status`, `GET …/projects`, `GET …/datasets`, `GET …/tables`, `POST …/describe`,
+    `POST …/publish`; `GET /api/connectors` now reports BigQuery's `oauthConfigured`.
+    [src/config/env.ts](../src/config/env.ts) adds `bigquery` config from `GOOGLE_OAUTH_*`.
+  - **Client/UI:** [app/api.ts](../app/api.ts) `bigQuery*` methods;
+    [app/components/BigQueryBuild.tsx](../app/components/BigQueryBuild.tsx) (Google sign-in popup via
+    `postMessage` `type:'bq-oauth'`, Billing/Project/Dataset dropdowns, shared `DataModelBuilder`,
+    Live/Extract radio, publish); `SetupPanel` connector dropdown gains "Google BigQuery".
+  - **Tests:** [tests/unit/bigqueryTdsGenerator.test.ts](../tests/unit/bigqueryTdsGenerator.test.ts)
+    + [tests/unit/bigqueryClient.test.ts](../tests/unit/bigqueryClient.test.ts) (mock `fetch`).
 
 ## Feature: Excel connector (Build datasource) (newest first)
 

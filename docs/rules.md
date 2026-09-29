@@ -1,7 +1,7 @@
 # Engineering & AI Rules — TableauPilot AI
 
 > **Binding** rules for anyone (human or AI) working in this repo. Update this whenever
-> an invariant, convention, or constraint changes. Last updated: 2026-09-22.
+> an invariant, convention, or constraint changes. Last updated: 2026-09-29.
 
 ## 1. Tech to use / avoid
 
@@ -16,9 +16,9 @@
 
 **Avoid**
 - **No Python except the one sanctioned Hyper sidecar** (`scripts/hyper/build_tdsx.py`,
-  used only to materialize the Build-datasource connectors' `.hyper` extracts (Salesforce
-  and Excel) — the Hyper API has no Node binding). Do not spread Python anywhere else (see
-  [python-dependency-decision.md](./python-dependency-decision.md)).
+  used only to materialize the Build-datasource connectors' `.hyper` extracts (Salesforce,
+  Excel, and BigQuery **extract** mode) — the Hyper API has no Node binding). Do not spread
+  Python anywhere else (see [python-dependency-decision.md](./python-dependency-decision.md)).
 - **No fake authoring** — do not simulate shelf/mark/filter edits via the Embedding JS
   API; Tableau does not support it (see [authoring-limitations.md](./authoring-limitations.md)).
 - **No heavy/unnecessary dependencies.** Prefer stdlib + the minimal set above.
@@ -42,15 +42,27 @@
    `src/validation`, never delegated to the LLM.
 8. **`TableauService`/`TableauClient` is the only HTTP path to Tableau.** No other module
    calls Tableau directly. (Salesforce HTTP — SOAP login, REST describe/query, OAuth —
-   is isolated in `src/salesforce/*` and never talks to Tableau.)
-9. **Salesforce credentials are never embedded in a published extract.** They are held
-   transiently in-memory (`session.connectors.salesforce`) only to read schema/data, then
-   cleared. Published datasources authenticate via the saved Salesforce credential on
-   Tableau Cloud. Multi-object `.tds` field names are qualified `[Object.Field]`.
+   is isolated in `src/salesforce/*`; BigQuery HTTP — Google OAuth + BigQuery/Cloud
+   Resource Manager REST — is isolated in `src/bigquery/*`; neither talks to Tableau.)
+9. **Connector source credentials (tokens) are never persisted.** Salesforce creds and the
+   Google BigQuery OAuth **access/refresh token** are held transiently in-memory
+   (`session.connectors.{salesforce,bigquery}` + the short-lived pending-OAuth state) only to
+   read schema/data (and, for extracts, to build the local `.hyper`), then cleared after publish.
+   The BigQuery OAuth **client** id/secret (the app-registration credential, NOT a user token —
+   analogous to the Tableau Connected App secret) may be supplied in the UI and optionally saved
+   **encrypted in the user's vault** (`TableauCredentials.bigQueryOAuth`) so it need not be
+   re-entered; `GOOGLE_OAUTH_*` is an optional server-wide fallback. The signed-in Google email is
+   fetched from OpenID `userinfo` (never asked of the user) and used as the connection username +
+   Tableau saved-credential match. No user secret is ever written to `.env`, the browser, or logs. Published datasources
+   authenticate via the saved OAuth credential on Tableau Cloud (Salesforce OAuth / Google
+   BigQuery OAuth). Multi-object `.tds` field names are qualified/disambiguated so they never
+   collide (`[Object.Field]` for Salesforce/Excel; `Name`/`Name (Table)` for BigQuery, which
+   also keeps the REAL BigQuery column name as `remote-name`).
 10. **The conversational copilot stays in scope.** `tableauPilotAgent` only assists with
-    this product (Tableau dashboards, the locked datasource/fields, the Salesforce/Excel
-    connector builds, and the app workflow); it politely declines and redirects off-topic
-    requests (general knowledge, unrelated code, chit-chat) rather than answering them.
+    this product (Tableau dashboards, the locked datasource/fields, the
+    Salesforce/Excel/BigQuery connector builds, and the app workflow); it politely declines
+    and redirects off-topic requests (general knowledge, unrelated code, chit-chat) rather
+    than answering them.
 
 ## 3. Security rules
 
@@ -97,6 +109,18 @@
   logic). Sheets are the "objects"; sheet/column names are sanitized to identifier-safe ids.
   Publish **extract-only**: NO `connectionCredentials`, NO credential embed, NO refresh — the
   bundled `.hyper` is the data. Never change Salesforce datasource logic to add Excel.
+- **Google BigQuery datasources (live or extract):** generate the `.tds` deterministically in
+  `bigqueryTdsGenerator.ts` (a `class='bigquery'` OAuth connection with
+  `CATALOG`/`EXECCATALOG`/`project`/`schema`, and `[project.dataset].[table]` relations),
+  reconciled 1:1 against `reference/BigQueryDataset{Live,Extract}.tds`. BigQuery column names
+  may contain spaces/hyphens, so this generator writes its OWN `<cols>`/`<metadata-records>`/
+  `<column>`/`<object-graph>` (keeping the REAL name as `remote-name`/`remote-alias` and a
+  disambiguated `local-name`) instead of the identifier-only shared helpers. **Live** publishes
+  a bare `.tds` (no `<extract>`, manifest omits `ObjectModelExtractV2`) and does nothing after
+  embedding the OAuth credential. **Extract** materializes rows into a `.hyper` (Python sidecar,
+  hyper table = the per-table object-id) and, after publish, embeds the Google OAuth credential
+  + triggers a refresh (best-effort). Both embed the saved Google BigQuery OAuth credential
+  (matched by the signed-in email). Never change Salesforce/Excel datasource logic to add BigQuery.
 
 ## 6. Coding conventions
 

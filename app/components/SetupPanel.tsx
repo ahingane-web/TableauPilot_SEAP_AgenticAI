@@ -4,6 +4,7 @@ import type { DatasourceMetadataView, NamedItem, SessionContext } from '../types
 import { Busy, ErrorPanel, Collapsible } from './common';
 import { DataModelBuilder, type DataModel } from './DataModelBuilder';
 import { ExcelBuild } from './ExcelBuild';
+import { BigQueryBuild } from './BigQueryBuild';
 
 /** Multi-object data-modeling mode: Tableau relationships vs a physical join. */
 type SfMode = 'relationship' | 'join';
@@ -19,7 +20,7 @@ interface SfRelationship {
 }
 
 /** Which connector the "Build datasource" flow targets. */
-type Connector = 'salesforce' | 'excel';
+type Connector = 'salesforce' | 'excel' | 'bigquery';
 
 /**
  * Connect + select destination project + select and LOCK the datasource.
@@ -284,6 +285,7 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                         <select value={connector} onChange={(e) => setConnector(e.target.value as Connector)} style={{ width: '100%' }}>
                           <option value="salesforce">Salesforce</option>
                           <option value="excel">Excel (.xlsx)</option>
+                          <option value="bigquery">Google BigQuery</option>
                         </select>
                       </div>
                     </div>
@@ -309,8 +311,10 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                         setServerCustom={setSfServerCustom}
                         onPublish={publishSalesforce}
                       />
-                    ) : (
+                    ) : connector === 'excel' ? (
                       <ExcelBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                    ) : (
+                      <BigQueryBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
                     )}
                   </>
                 )}

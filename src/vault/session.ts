@@ -14,6 +14,7 @@ import type { DashboardPlan } from '../schemas/dashboardPlan.js';
 import type { SalesforceCredentials, SalesforceSession, SalesforceTable } from '../salesforce/client.js';
 import type { ExcelSheet } from '../excel/excelClient.js';
 import { sweepPendingOauth } from '../salesforce/oauthStore.js';
+import { sweepPendingBigQueryOauth } from '../bigquery/oauthStore.js';
 import type { DatasourceMetadata } from '../tableau/types.js';
 import type { TableauCredentials } from './types.js';
 
@@ -44,6 +45,28 @@ export interface ConnectorState {
     filename: string;
     /** Parsed worksheets: identifier-safe id + caption + typed columns + coerced rows. */
     sheets: ExcelSheet[];
+  };
+  /**
+   * Transient Google BigQuery OAuth state for the "Build datasource" flow. The Google
+   * access/refresh token (obtained via browser sign-in) is held here — memory only — so
+   * subsequent listing (projects/datasets/tables) + the extract's row queries can call the
+   * BigQuery REST API, and so a LIVE datasource can embed the OAuth credential on publish.
+   * Cleared once the datasource is published (or the session is cleared). Never persisted,
+   * logged, or sent to the client (only the email is surfaced, for the connection username).
+   */
+  bigquery?: {
+    /** Signed-in Google account email — the BigQuery connection `username` (non-secret). */
+    email: string;
+    /** OAuth access token (Bearer for BigQuery/Cloud Resource Manager REST). Secret. */
+    accessToken: string;
+    /** OAuth refresh token, if Google returned one (long sessions). Secret. */
+    refreshToken?: string;
+    /** Epoch ms when the access token expires (best-effort; triggers a refresh). */
+    expiresAt?: number;
+    /** OAuth client id used for this flow (needed to refresh the access token). */
+    clientId: string;
+    /** OAuth client secret, if the flow used a confidential client (needed to refresh). Secret. */
+    clientSecret?: string;
   };
 }
 
@@ -151,6 +174,7 @@ export function startSessionSweeper(intervalMs = 60_000): () => void {
       if (s.expiresAt < now) destroySession(id);
     }
     sweepPendingOauth();
+    sweepPendingBigQueryOauth();
   }, intervalMs);
   handle.unref?.();
   return () => clearInterval(handle);

@@ -12,9 +12,9 @@ asks for your approval, generates a real Tableau workbook (`.twb`), **publishes 
 Tableau Cloud over REST**, opens the **real** Web Authoring embed for hands-on
 refinement, and **verifies** the published result — returning the actual Tableau URL.
 
-It also includes a **"Build datasource"** feature: connect to a source (**Salesforce** or
-**Excel** today), model it (relationships or joins), and publish an **extract-backed**
-Tableau datasource.
+It also includes a **"Build datasource"** feature: connect to a source (**Salesforce**,
+**Excel**, or **Google BigQuery** today), model it (relationships or joins), and publish a
+Tableau datasource (extract-backed, or — for BigQuery — a **live** connection).
 
 Two design commitments run through everything:
 
@@ -77,9 +77,16 @@ Browser SPA (React/Vite)                 Node server (Hono BFF)                E
 - **Excel** — upload an `.xlsx`; each **sheet** becomes an object for the same
   Relationship/Join modeling. Published **extract-only** (the bundled `.hyper` is the
   data — no live connection, no embedded credential, no refresh).
+- **Google BigQuery** — sign in with **Google (browser OAuth + PKCE)**, pick a Billing
+  Project > Project > Dataset, and each **table** becomes an object for the same
+  Relationship/Join modeling. Choose **Live** (Tableau queries BigQuery directly over OAuth)
+  or **Extract** (rows queried into a local `.hyper`, refreshed on Cloud). Both embed the
+  publisher's saved Google BigQuery OAuth credential. The OAuth **client** id/secret is entered
+  in the UI and can be saved encrypted in the user's vault (env `GOOGLE_OAUTH_*` is an optional
+  fallback); the email is read from `userinfo`, never asked.
 
-Both reuse the same shared machinery: the `DataModelBuilder` UI, the TDS-generation
-helpers, the Hyper sidecar, and the publish pipeline.
+All reuse the same shared machinery: the `DataModelBuilder` UI, the TDS-generation
+helpers, the Hyper sidecar (extract shapes), and the publish pipeline.
 
 ## End-to-end flow (start to finish)
 
@@ -174,19 +181,22 @@ Step-by-step, tied to the code:
 
 When you instead choose **Build datasource** in `SetupPanel.tsx`:
 
-1. **Connect / upload** — Salesforce: `POST /api/connectors/salesforce/connect` logs in
-   and lists objects; Excel: `POST /api/connectors/excel/upload` parses the workbook
-   (`src/excel/excelClient.ts`) into sheets. State is transient on the session.
+1. **Connect / upload / sign in** — Salesforce: `POST /api/connectors/salesforce/connect`
+   logs in and lists objects; Excel: `POST /api/connectors/excel/upload` parses the workbook
+   (`src/excel/excelClient.ts`) into sheets; BigQuery: browser Google OAuth
+   (`/api/connectors/bigquery/oauth/*`, `src/bigquery/*`) then list projects/datasets/tables.
+   State is transient on the session.
 2. **Model** — the shared `DataModelBuilder.tsx` lets you add tables/sheets and define
    relationships or physical joins; join fields come from `describe` calls.
 3. **Publish** — `POST /api/connectors/<name>/publish` calls the orchestrator in
    `src/tableau/index.ts`: it generates the `.tds` (`authoring/tdsGenerator.ts` /
-   `excelTdsGenerator.ts`), materializes a `.hyper` via the Python sidecar
-   (`publishing/hyperPackager.ts`), and publishes the `.tdsx`
-   (`publishing/datasource.ts`).
-4. **Credential + refresh (Salesforce)** — the saved Salesforce OAuth credential is
-   embedded on the connection and an extract refresh is triggered. **Excel** is
-   extract-only (bundled `.hyper` is the data; no credential, no refresh).
+   `excelTdsGenerator.ts` / `bigqueryTdsGenerator.ts`) and, for extracts, materializes a
+   `.hyper` via the Python sidecar (`publishing/hyperPackager.ts`), then publishes the
+   `.tdsx` (or a bare `.tds` for a BigQuery **Live** datasource) via `publishing/datasource.ts`.
+4. **Credential + refresh** — **Salesforce**: the saved Salesforce OAuth credential is
+   embedded and an extract refresh is triggered. **BigQuery**: the saved Google BigQuery OAuth
+   credential is embedded (Live and Extract); Extract also triggers a refresh, Live does not.
+   **Excel** is extract-only (bundled `.hyper` is the data; no credential, no refresh).
 5. **Lock + continue** — the freshly published datasource is locked, and the normal
    dashboard flow above proceeds unchanged.
 
@@ -199,7 +209,7 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
   gateway or OpenRouter.
 - **Tableau:** REST + Metadata APIs; server-side `.twb`/`.tds` XML generation.
 - **Extracts:** Tableau Hyper API via a Python sidecar (`.venv-hyper`), plus `exceljs` for
-  Excel parsing.
+  Excel parsing and pure-`fetch` BigQuery/Cloud Resource Manager REST for BigQuery.
 - **Validation:** Zod schemas for all AI output and API boundaries.
 - **Testing:** Vitest (unit/integration), Playwright (e2e).
 
@@ -210,6 +220,7 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
     datasource" connector switch (the Salesforce sub-flow lives inline here).
   - `components/DataModelBuilder.tsx` — shared relationship/join modeling UI.
   - `components/ExcelBuild.tsx` — the Excel connector sub-flow.
+  - `components/BigQueryBuild.tsx` — the Google BigQuery connector sub-flow (OAuth, Live/Extract).
 - `src/server/` — Hono app (`app.ts` routes, `index.ts` bootstrap).
 - `src/agents/` — Mastra agents (`tableauPilotAgent`, `dashboardPlannerAgent`,
   `calculationEngineerAgent`, plus knowledge).
@@ -220,12 +231,14 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
   - `index.ts` — the `TableauService` orchestrator (connect, lock, publish, connector
     builds).
   - `authoring/` — `.twb`/`.tds` generation (`tdsGenerator.ts` shared helpers,
-    `excelTdsGenerator.ts`, worksheet/chart/filter/calc builders, `twbxPackager.ts`).
+    `excelTdsGenerator.ts`, `bigqueryTdsGenerator.ts`, worksheet/chart/filter/calc builders,
+    `twbxPackager.ts`).
   - `publishing/` — `datasource.ts` (publish, embed credential, refresh), `hyperPackager.ts`
     (sidecar).
   - `auth/`, `discovery/`, `datasources/`, `permissions/`, `verification/`.
 - `src/salesforce/` — Salesforce client + OAuth (`client.ts`, `oauth.ts`, `oauthStore.ts`).
 - `src/excel/` — `excelClient.ts` (workbook parsing).
+- `src/bigquery/` — BigQuery client + Google OAuth (`client.ts`, `oauth.ts`, `oauthStore.ts`).
 - `src/vault/` — PIN-encrypted credential vault, sessions, crypto.
 - `src/schemas/` — Zod schemas (`common.ts` holds connector build/relationship schemas).
 - `src/config/`, `src/llm/`, `src/memory/`, `src/observability/`, `src/utils/` — infra.
@@ -239,9 +252,12 @@ Identity is a username + 6-digit PIN; the PIN derives an AES-256-GCM key (via sc
 a server-only `VAULT_PEPPER` + per-user salt) that encrypts credentials at rest. On
 unlock, decrypted secrets live only in an in-memory session keyed by an opaque
 `sessionId`; the browser holds only that id. Logs, traces, LLM inputs, and tool outputs
-are redacted/sanitized so tokens never leak. Connector credentials (Salesforce/Excel) are
-transient and cleared after publish; published datasources rely on Tableau Cloud's saved
-credentials, not secrets this app stores. Full detail: `docs/security.md`.
+are redacted/sanitized so tokens never leak. Connector source credentials/tokens
+(Salesforce creds, the Google BigQuery OAuth token) are transient and cleared after publish;
+published datasources rely on Tableau Cloud's saved credentials, not secrets this app stores.
+(The BigQuery OAuth *client* id/secret — an app-registration credential, not a user token — may
+optionally be saved encrypted in the user's vault so it need not be re-entered.) Full detail:
+`docs/security.md`.
 
 ## How to run
 
@@ -262,6 +278,7 @@ Open http://localhost:5173. Production: `npm run build` then `npm start`. Tests:
   (`docs/authoring-limitations.md`).
 - **Generated `.twb` is best-effort** and may need field re-binding/visual tuning.
 - **File connectors are extract-only** (a local file path can't live-connect on Cloud).
+  BigQuery supports both **Live** and **Extract** (it's a real cloud warehouse, not a file).
 - **Server-side `createExtract` is unsupported on the target Cloud site**, so extracts are
   built locally via the Hyper sidecar.
 

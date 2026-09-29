@@ -1,7 +1,7 @@
 # PRD — TableauPilot AI
 
 > Living document. Update this whenever product scope, requirements, or success
-> criteria change. Last updated: 2026-09-14.
+> criteria change. Last updated: 2026-09-29.
 
 ## 1. Summary
 
@@ -83,6 +83,15 @@ or joins). The selected sheets are materialized into a `.hyper` and published **
 Flow: `Build datasource > select connector > Excel > upload > select sheet(s) > Relationship
 or Join > publish`.
 
+**Alternate flow — Google BigQuery data source builder.** Pick the **Google BigQuery**
+connector and **sign in with Google** in a browser OAuth popup. Choose a **Billing Project >
+Project > Dataset**; the dataset's **tables** appear as the "objects" for the SAME modeling
+step (relationships or joins). Choose **Live** (Tableau queries BigQuery directly over OAuth)
+or **Extract** (rows are materialized into a bundled `.hyper` and refreshed on Tableau Cloud
+after publish). Both embed the signed-in account's saved BigQuery OAuth credential. Flow:
+`Build datasource > select connector > Google BigQuery > Sign in with Google > pick billing
+project/project/dataset > select table(s) > Relationship or Join > Live or Extract > publish`.
+
 ## 6. Functional requirements
 
 - **FR1 Vault.** Register/unlock with username + 6-digit PIN; AES-256-GCM at rest;
@@ -122,6 +131,14 @@ or Join > publish`.
   → `.tdsx` and publishes it **extract-only** (no connection credential, no refresh). Sheet and
   column names are sanitized to identifier-safe ids; multi-sheet field names are qualified
   (`Sheet.Field`). No Salesforce datasource logic is altered.
+- **FR15 Google BigQuery connector.** Sign in with **Google (browser OAuth + PKCE)**; list the
+  account's GCP projects, a dataset's tables, and describe columns; model one or more tables as
+  **relationships** or a **physical join**; choose **Live** or **Extract**. Live publishes a bare
+  `class='bigquery'` OAuth `.tds` (Tableau queries BigQuery directly); Extract queries rows,
+  materializes a local `.hyper` (Python sidecar) + `.tdsx`, publishes it, and triggers a
+  server-side refresh. Both embed the signed-in account's saved BigQuery OAuth credential
+  (matched by email). BigQuery column names (which may contain spaces/hyphens) are kept as the
+  connection `remote-name` with disambiguated local names. No Salesforce/Excel logic is altered.
 
 ## 7. Non-functional requirements
 

@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-09-14.
+> decisions change. Last updated: 2026-09-29.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -133,6 +133,32 @@ The uploaded workbook (schema + rows) lives only on `session.connectors.excel` (
 and is cleared once publishing completes. The published datasource is a static extract —
 the bundled `.hyper` IS the data ("include external files → extract"); the `excel-direct`
 `filename` is retained only for lineage and is never read on Tableau Cloud.
+
+## 3d. Data flow — Google BigQuery datasource (`buildAndPublishBigQueryDatasource`)
+
+The third connector plugs into the SAME pluggable "Build datasource" flow (shared
+`DataModelBuilder`), but adds a **Live/Extract** choice. BigQuery tables play the role
+Salesforce objects / Excel sheets play. Authentication is **browser Google OAuth** (PKCE);
+the access/refresh token is held only on `session.connectors.bigquery` (in-memory).
+
+```
+Sign in with Google (OAuth popup)  →  server holds the access/refresh token in-memory
+  → pick Billing Project > Project > Dataset  (Cloud Resource Manager + BigQuery REST)
+  → user models TABLES in the shared DataModelBuilder (mode + relationships/joins)
+  → describe each table (BigQuery REST)  [+ for EXTRACT: query rows via jobs.query]
+  → generate .tds via bigqueryTdsGenerator  (class='bigquery' OAuth connection +
+       [project.dataset].[table] relations; real column names kept as remote-name)
+  → LIVE:    publish a bare .tds   (no <extract>)          →  embed Google OAuth cred
+    EXTRACT: materialize .hyper + package .tdsx (Python sidecar) → publish → embed cred
+             → server-side extract refresh (refreshDatasourceNow)
+  → lock datasource + cache table fields  →  converge on the normal dashboard flow
+```
+
+The token is cleared once publishing completes. Both shapes embed the signed-in Google
+account's **saved BigQuery OAuth credential** on Tableau Cloud (matched by email), so the
+datasource is connectable/refreshable. LIVE runs nothing after publish (Tableau queries
+BigQuery directly); EXTRACT triggers a refresh (best-effort — the bundled `.hyper` already
+holds data queried at publish time).
 
 ## 4. Trust & secret boundaries
 

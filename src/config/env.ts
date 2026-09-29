@@ -82,6 +82,20 @@ export interface AppConfig {
     readonly oauthClientId?: string;
     readonly oauthClientSecret?: string;
   };
+  readonly bigquery: {
+    /**
+     * OAuth callback URL the Google browser sign-in flow redirects to. Must be registered
+     * as an Authorized redirect URI on the Google OAuth 2.0 client. Defaults to the local API.
+     */
+    readonly oauthRedirectUri: string;
+    /**
+     * A pre-registered Google OAuth 2.0 client (Web application) used for browser sign-in,
+     * so the UI can offer a single "Sign in with Google" button. `GOOGLE_OAUTH_CLIENT_ID`
+     * (and, for a confidential client, `GOOGLE_OAUTH_CLIENT_SECRET`).
+     */
+    readonly oauthClientId?: string;
+    readonly oauthClientSecret?: string;
+  };
   readonly hyper: {
     /**
      * Python interpreter (with `tableauhyperapi` installed) used to materialize a
@@ -158,6 +172,13 @@ export function getConfig(): AppConfig {
         `http://localhost:${apiPort}/api/connectors/salesforce/oauth/callback`,
       oauthClientId: str('SALESFORCE_OAUTH_CLIENT_ID'),
       oauthClientSecret: str('SALESFORCE_OAUTH_CLIENT_SECRET'),
+    },
+    bigquery: {
+      oauthRedirectUri:
+        str('GOOGLE_OAUTH_REDIRECT_URI') ??
+        `http://localhost:${apiPort}/api/connectors/bigquery/oauth/callback`,
+      oauthClientId: str('GOOGLE_OAUTH_CLIENT_ID'),
+      oauthClientSecret: str('GOOGLE_OAUTH_CLIENT_SECRET'),
     },
     hyper: {
       python: str('HYPER_PYTHON') ?? resolve(process.cwd(), '.venv-hyper/bin/python'),

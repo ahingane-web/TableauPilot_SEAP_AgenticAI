@@ -1,7 +1,7 @@
 # Design — TableauPilot AI
 
 > Living document. Update this whenever module interfaces, schemas, algorithms, or
-> code-level decisions change. Last updated: 2026-09-14.
+> code-level decisions change. Last updated: 2026-09-29.
 
 This is the module-level design. For the big picture see
 [architecture.md](./architecture.md); for binding rules see [rules.md](./rules.md).
@@ -241,6 +241,61 @@ with **no `connectionCredentials`** and **skips** credential embed + refresh (ex
 locks the datasource, and writes `session.flow.connectorMetadata` via `excelSheetsToMetadata`
 (qualified `SheetId.Field` for multi-sheet). The transient upload is cleared after publish.
 
+## 5d. Google BigQuery connector — live OR extract datasource builder
+
+A third "Build datasource" entry point that signs in with **Google (browser OAuth + PKCE)**,
+lists **Billing Project > Project > Dataset > tables**, and reuses the SAME shared modeling UI
+(`DataModelBuilder`) + publish/lock pipeline. A **Live/Extract** selector chooses the shape.
+No Salesforce/Excel logic is touched (all additive).
+
+**OAuth (`src/bigquery/oauth.ts` + `oauthStore.ts`)** — Google Authorization-Code + PKCE:
+`buildAuthorizeUrl` (`accounts.google.com/o/oauth2/v2/auth`, scopes `openid email` +
+`bigquery` + `cloudplatformprojects.readonly` — matching Tableau Desktop's own BigQuery
+connector; `access_type=offline`, `prompt=consent`),
+`exchangeCodeForToken`/`refreshAccessToken` (`oauth2.googleapis.com/token`), `fetchUserEmail`
+(userinfo → connection username). A single-use `state`→`PendingBigQueryOauth` map (10-min TTL,
+swept by `startSessionSweeper`) routes the header-less callback to the originating session. The
+OAuth **client id/secret are dynamic**: `bigQueryOauthStart` resolves them per-request (UI) →
+vault (`VaultService.getBigQueryOAuthClient`) → `GOOGLE_OAUTH_*`. `/api/connectors` reports
+`oauthConfigured`; when the server has no env client, `BigQueryBuild` shows an in-UI how-to +
+Client ID/secret inputs and can persist them **encrypted in the vault** (`saveBigQueryOAuthClient`
+→ `TableauCredentials.bigQueryOAuth`, secret preserved when a blank submit reuses the same id) via
+`POST /api/connectors/bigquery/oauth/client`, prefilled on return by the GET. Only this reusable
+client is vaulted; the access/refresh token stays transient on the session and the email comes
+from `userinfo` (never asked).
+
+**REST client (`src/bigquery/client.ts`, pure `fetch`)** — `listProjects` (Cloud Resource
+Manager `projects.list`), `listDatasets`/`listTables`/`describeTable`/`queryRows` (BigQuery v2
+`datasets.list`/`tables.list`/`tables.get`/`jobs.query`+pagination). `describeTable` returns
+scalar columns (real name + identifier-safe `safeName` + type + nullability), skipping
+nested/repeated fields. `queryRows` builds a backtick-quoted `google-sql` SELECT against the
+billing project and coerces values to the Hyper sidecar formats. `bigQueryToSalesforceToken`/
+`bigQueryToHyperType` map BQ types. Only this module talks to Google; never to Tableau.
+
+**TDS generation (`src/tableau/authoring/bigqueryTdsGenerator.ts`)** — `generateBigQueryTds`
+(single), `generateBigQueryRelationshipsTds`, `generateBigQueryPhysicalJoinTds`, each taking
+`materialization: 'live' | 'extract'`. Emits a `class='bigquery'` OAuth named-connection
+(`CATALOG`=data project, `EXECCATALOG`=billing project, `project`=display name, `schema`=dataset,
+`server-oauth=''`, `username`=email) and `[project.dataset].[table]` relations, reconciled 1:1
+with `reference/BigQueryDataset{Live,Extract}.tds`. Because BQ column names may contain
+spaces/hyphens, it writes its OWN `<cols>`/`<metadata-records>`/`<column>`/`<object-graph>`,
+keeping the REAL name as `remote-name`/`remote-alias` and a globally-unique `local-name`
+(duplicates become `Name (Table)`). **Live** omits `<extract>` and the `ObjectModelExtractV2`
+manifest flag and maps only `context=''`; **Extract** adds the `class='hyper'` extract over
+`Extract."<objectId>"` tables (object-id = `<SafeTable>_<md5>`) + a `context='extract'`
+object-graph property. `bigQueryFieldIdentities` exposes the disambiguated identities so the
+façade's metadata matches the published datasource exactly.
+
+**Façade (`src/tableau/index.ts`)** — `bigQueryOauthStart`/`completeBigQueryOauth`/
+`bigQueryConnected`, `bigQueryListProjects`/`bigQueryListDatasets`/`bigQueryListTables`/
+`bigQueryDescribeTable`, and `buildAndPublishBigQueryDatasource(session, input)`: describe each
+table → (extract only) query rows → generate the `.tds` (single/relationships/join × live/extract)
+→ publish a `.tdsx` (extract, via `buildExtractTdsx`) or a bare `.tds` (live) with an embedded
+Google OAuth credential → best-effort embed on the connection(s) → **extract-only**
+`refreshDatasourceNow` → lock + `bigQueryTablesToMetadata`. `bigQueryAuth` refreshes the token
+near expiry. Transient state lives on `session.connectors.bigquery` (email + access/refresh token
++ OAuth client) and is cleared after publish.
+
 ## 6. Validation & guards (`src/validation/*`)
 
 - `fieldValidation.ts`: `validatePlanFields(plan, metadata)` extracts fields from
@@ -286,7 +341,7 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | POST | `/api/dashboard/approve` | approve by hash |
 | POST | `/api/dashboard/execute` | publish + verify |
 | GET | `/api/embed/info` | embed URL + optional JWT |
-| GET | `/api/connectors` | list source connectors (e.g. Salesforce) |
+| GET | `/api/connectors` | list source connectors (Salesforce, Excel, Google BigQuery) |
 | POST | `/api/connectors/salesforce/connect` | username/password login → list objects |
 | POST | `/api/connectors/salesforce/oauth/start` | begin browser OAuth (PKCE) |
 | GET | `/api/connectors/salesforce/oauth/callback` | OAuth redirect handler |
@@ -295,6 +350,16 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | POST | `/api/connectors/salesforce/publish` | build + publish extract datasource |
 | POST | `/api/connectors/excel/upload` | upload `.xlsx`/`.xlsm` (multipart) → list sheets + columns |
 | POST | `/api/connectors/excel/publish` | build + publish an **extract-only** Excel datasource |
+| POST | `/api/connectors/bigquery/oauth/start` | begin Google browser OAuth (PKCE) |
+| GET | `/api/connectors/bigquery/oauth/callback` | Google OAuth redirect handler |
+| GET | `/api/connectors/bigquery/oauth/client` | read vault-saved OAuth client (non-secret) + env-configured flag |
+| POST | `/api/connectors/bigquery/oauth/client` | save/clear the OAuth client id/secret in the user's vault |
+| GET | `/api/connectors/bigquery/status` | whether a BigQuery OAuth session is active (+ email) |
+| GET | `/api/connectors/bigquery/projects` | list the account's GCP projects |
+| GET | `/api/connectors/bigquery/datasets?projectId=` | list datasets in a project |
+| GET | `/api/connectors/bigquery/tables?projectId=&datasetId=` | list tables in a dataset |
+| POST | `/api/connectors/bigquery/describe` | describe a table's columns |
+| POST | `/api/connectors/bigquery/publish` | build + publish a **live or extract** BigQuery datasource |
 
 Client returns a sanitized error envelope `{ error: { code, message, hint?, details? } }`.
 

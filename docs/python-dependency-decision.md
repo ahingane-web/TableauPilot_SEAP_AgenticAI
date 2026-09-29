@@ -2,7 +2,8 @@
 
 **Decision: TableauPilot is TypeScript / Node.js, with ONE narrow exception — a Python
 Hyper API sidecar used solely to materialize `.hyper` extracts for the Build-datasource
-connectors (Salesforce and Excel).**
+connectors (Salesforce, Excel, and Google BigQuery — the latter only when the user picks
+"Extract"; a BigQuery "Live" datasource needs no sidecar).**
 
 ## Background
 
@@ -33,9 +34,11 @@ is exactly the trigger this document always named for revisiting the no-Python s
   with the generated `.tds` into a `.tdsx`. That is the entire surface.
 - Invoked as a subprocess by
   [`src/tableau/publishing/hyperPackager.ts`](../src/tableau/publishing/hyperPackager.ts).
-  Both connectors reuse this one sidecar: the Excel connector parses the workbook in
-  TypeScript (`exceljs`) and feeds the same schema + rows into it. All connector access,
-  `.tds`/`.twb` authoring, and publishing stay in TypeScript.
+  All connectors reuse this one sidecar: the Excel connector parses the workbook in
+  TypeScript (`exceljs`) and the BigQuery connector queries rows over REST (`jobs.query`),
+  each feeding the same schema + rows into it. All connector access, `.tds`/`.twb` authoring,
+  and publishing stay in TypeScript. (A BigQuery **Live** datasource skips the sidecar entirely
+  — it publishes a bare `.tds` with no `.hyper`.)
 - Installed into a local virtualenv via `npm run setup:hyper` (`.venv-hyper/`, gitignored).
   The interpreter path is configurable via `HYPER_PYTHON`.
 - No secrets or row data are passed on argv — only temp file paths.
@@ -49,7 +52,10 @@ is exactly the trigger this document always named for revisiting the no-Python s
   refreshable on Cloud (see [design.md](./design.md) §5b and [memory.md](./memory.md)).
   The Excel connector materializes the `.hyper` the same way, but publishes it
   **extract-only** — no credential is embedded and no refresh is triggered (the bundled
-  extract is the data).
+  extract is the data). The BigQuery connector (Extract mode) materializes the `.hyper` from a
+  live `jobs.query`, then embeds the publisher's **saved Google BigQuery OAuth credential** and
+  triggers a refresh — like Salesforce; BigQuery **Live** embeds the credential but skips the
+  local `.hyper`/refresh (Tableau queries BigQuery directly).
 - XML is still generated deterministically in TypeScript, never by the LLM.
 - If a future feature needs richer local extract logic, extend the sidecar rather than
   spreading Python across the codebase.

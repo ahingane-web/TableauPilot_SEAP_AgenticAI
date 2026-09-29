@@ -24,6 +24,16 @@ export interface TableauCredentials {
     secretId: string;
     secretValue: string;
   };
+  /**
+   * Optional saved Google OAuth *client* (id + optional secret) for the BigQuery connector's
+   * browser sign-in, so the user does not re-enter it each time. This is the APP registration
+   * credential (like `connectedApp`), NOT the per-user access/refresh token — that token is
+   * still held only transiently in-memory and never persisted.
+   */
+  bigQueryOAuth?: {
+    clientId: string;
+    clientSecret?: string;
+  };
 }
 
 /** Non-secret summary of what a user has saved — safe to send to the client. */
@@ -34,6 +44,10 @@ export interface CredentialSummary {
   hasPatSecret: boolean;
   hasConnectedApp: boolean;
   connectedAppClientId?: string;
+  /** Whether a Google BigQuery OAuth client is saved in the vault (+ its non-secret client id). */
+  hasBigQueryOAuth: boolean;
+  bigQueryOAuthClientId?: string;
+  bigQueryOAuthHasSecret?: boolean;
 }
 
 /** On-disk vault record. `creds`/`verifier` are encrypted; nothing here is plaintext-secret. */
@@ -56,5 +70,8 @@ export function summarizeCredentials(creds: TableauCredentials): CredentialSumma
     hasPatSecret: Boolean(creds.patSecret),
     hasConnectedApp: Boolean(creds.connectedApp?.secretValue),
     connectedAppClientId: creds.connectedApp?.clientId,
+    hasBigQueryOAuth: Boolean(creds.bigQueryOAuth?.clientId),
+    bigQueryOAuthClientId: creds.bigQueryOAuth?.clientId,
+    bigQueryOAuthHasSecret: Boolean(creds.bigQueryOAuth?.clientSecret),
   };
 }

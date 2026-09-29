@@ -62,8 +62,25 @@ import {
   generateExcelPhysicalJoinTds,
   excelToHyperType,
 } from './authoring/excelTdsGenerator.js';
+import {
+  generateBigQueryTds,
+  generateBigQueryRelationshipsTds,
+  generateBigQueryPhysicalJoinTds,
+  bigQueryObjectId,
+  bigQueryToHyperType,
+  bigQueryFieldIdentities,
+  type BigQueryMaterialization,
+  type BigQueryTableSpec,
+  type BigQueryRelationshipSpec,
+  type BigQueryConnectionInfo,
+  type BigQueryFieldIdentity,
+} from './authoring/bigqueryTdsGenerator.js';
 import { buildExtractTdsx, type ExtractColumn, type ExtractTable } from './publishing/hyperPackager.js';
 import { parseWorkbook, type ExcelSheet, type ExcelColumn } from '../excel/excelClient.js';
+import * as BigQuery from '../bigquery/client.js';
+import type { BigQueryField } from '../bigquery/client.js';
+import * as BigQueryOauth from '../bigquery/oauth.js';
+import { putPendingBigQueryOauth, takePendingBigQueryOauth } from '../bigquery/oauthStore.js';
 
 /** Result of building/publishing a Salesforce extract datasource (API/UI contract). */
 export interface ExtractResult {
@@ -268,6 +285,86 @@ async function storeSalesforceConnectorState(
   return tables;
 }
 
+/** Map a BigQuery field identity (from the generator's normalization) to a Tableau datasource field. */
+function bigQueryIdentityToDatasourceField(id: BigQueryFieldIdentity): DatasourceField {
+  const twb = id.twb; // string|integer|real|boolean|date|datetime
+  const dataType =
+    twb === 'integer'
+      ? 'INTEGER'
+      : twb === 'real'
+        ? 'REAL'
+        : twb === 'boolean'
+          ? 'BOOLEAN'
+          : twb === 'date'
+            ? 'DATE'
+            : twb === 'datetime'
+              ? 'DATETIME'
+              : 'STRING';
+  const isDate = twb === 'date' || twb === 'datetime';
+  const role: FieldRole = twb === 'integer' || twb === 'real' ? 'measure' : 'dimension';
+  // The field's identity in the published datasource is its disambiguated local-name.
+  return { name: id.local, role, dataType, isDate, fieldType: 'ColumnField' };
+}
+
+/**
+ * Build DatasourceMetadata for a BigQuery datasource from the generator's field identities,
+ * so the dashboard flow has real fields IMMEDIATELY (without waiting on Metadata API
+ * indexing) and its references match the published datasource's column identities exactly.
+ */
+function bigQueryTablesToMetadata(
+  datasourceId: string,
+  datasourceName: string,
+  tables: BigQueryTableSpec[],
+): DatasourceMetadata {
+  const identities = bigQueryFieldIdentities(tables);
+  const seen = new Set<string>();
+  const mapped: DatasourceField[] = [];
+  for (const id of identities) {
+    if (seen.has(id.local)) continue;
+    seen.add(id.local);
+    mapped.push(bigQueryIdentityToDatasourceField(id));
+  }
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+/**
+ * Return a valid BigQuery access token for the session, refreshing it first if it is (near)
+ * expired and a refresh token is available. Updates the transient session state in place.
+ * The token is memory-only and never logged.
+ */
+async function bigQueryAuth(session: Session): Promise<BigQuery.BigQueryAuth> {
+  const bq = session.connectors?.bigquery;
+  if (!bq?.accessToken) {
+    throw new AppError('CONNECTOR_API', 'Not signed in to Google BigQuery. Sign in first.');
+  }
+  const nearExpiry = bq.expiresAt != null && Date.now() > bq.expiresAt - 60_000;
+  if (nearExpiry && bq.refreshToken) {
+    try {
+      const refreshed = await BigQueryOauth.refreshAccessToken({
+        clientId: bq.clientId,
+        clientSecret: bq.clientSecret,
+        refreshToken: bq.refreshToken,
+      });
+      bq.accessToken = refreshed.accessToken;
+      bq.expiresAt = refreshed.expiresAt;
+      if (refreshed.refreshToken) bq.refreshToken = refreshed.refreshToken;
+    } catch (err) {
+      log.warn('BigQuery token refresh failed; using existing token', {
+        error: err instanceof AppError ? err.message : String(err),
+      });
+    }
+  }
+  return { accessToken: bq.accessToken };
+}
+
 export const TableauService = {
   /** Sign in to Tableau Cloud using the vault's PAT credentials. */
   async connect(session: Session): Promise<{ siteId: string; siteContentUrl: string; userId: string; serverUrl: string }> {
@@ -356,7 +453,11 @@ export const TableauService = {
 
   /** The connectors the Build-datasource flow supports. */
   listConnectors(): Array<{ id: string; label: string }> {
-    return [{ id: 'salesforce', label: 'Salesforce' }];
+    return [
+      { id: 'salesforce', label: 'Salesforce' },
+      { id: 'excel', label: 'Excel (.xlsx)' },
+      { id: 'bigquery', label: 'Google BigQuery' },
+    ];
   },
 
   /**
@@ -922,6 +1023,365 @@ export const TableauService = {
         `${anyCapped ? ` (some tables capped at ${maxRows.toLocaleString()})` : ''}.${refreshNote}`,
     };
     return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract };
+  },
+
+  // ---------------------------------------------------------------------------
+  // BigQuery connector (Build datasource). Interactive Google OAuth (browser
+  // sign-in), then list billing-project > project > dataset > tables, describe,
+  // and build + publish a LIVE or EXTRACT datasource. On success the flow
+  // converges on the SAME datasource lock + project context the other connectors
+  // produce. Salesforce and Excel connector logic is untouched.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Begin an interactive Google OAuth (browser sign-in) authorization for BigQuery. Returns
+   * the authorize URL the client opens in a popup, plus the callback URL that must be
+   * registered on the Google OAuth client. The PKCE verifier + client details are stored
+   * transiently, keyed by an opaque `state`, so the header-less callback can be routed back.
+   */
+  bigQueryOauthStart(
+    session: Session,
+    input: { clientId?: string; clientSecret?: string } = {},
+  ): { authUrl: string; redirectUri: string } {
+    requireAuth(session);
+    const cfg = getConfig().bigquery;
+    // Resolve the OAuth client id/secret in priority order: this request (UI-entered) →
+    // the user's vault-saved client → server env. This lets each user bring their own
+    // Google OAuth client (saved encrypted in their vault) without any `.env` config.
+    const saved = VaultService.getBigQueryOAuthClient(session);
+    const clientId = input.clientId || saved.clientId || cfg.oauthClientId;
+    const clientSecret = input.clientSecret || saved.clientSecret || cfg.oauthClientSecret;
+    if (!clientId) {
+      throw new AppError(
+        'CONNECTOR_API',
+        'Google BigQuery browser sign-in is not configured. Enter your Google OAuth Client ID in the connector (optionally save it to your vault), or set GOOGLE_OAUTH_CLIENT_ID on the server.',
+      );
+    }
+    const redirectUri = cfg.oauthRedirectUri;
+    const state = BigQueryOauth.generateState();
+    const pkce = BigQueryOauth.generatePkce();
+    putPendingBigQueryOauth(state, {
+      sessionId: session.id,
+      clientId,
+      clientSecret,
+      redirectUri,
+      codeVerifier: pkce.verifier,
+    });
+    const authUrl = BigQueryOauth.buildAuthorizeUrl({ clientId, redirectUri, state, codeChallenge: pkce.challenge });
+    return { authUrl, redirectUri };
+  },
+
+  /**
+   * Complete an interactive Google OAuth authorization from the callback. Looks up the
+   * originating session by `state`, exchanges the code for an access/refresh token, reads
+   * the account email (the connection username), and stores the transient BigQuery state.
+   */
+  async completeBigQueryOauth(params: { code: string; state: string }): Promise<{ sessionId: string }> {
+    const pending = takePendingBigQueryOauth(params.state);
+    if (!pending) {
+      throw new AppError('AUTH_FAILED', 'This Google sign-in link has expired or is invalid. Try again.');
+    }
+    const session = getSession(pending.sessionId);
+    if (!session) {
+      throw new AppError('AUTH_REQUIRED', 'Your session expired during Google sign-in. Unlock your vault and retry.');
+    }
+    const token = await BigQueryOauth.exchangeCodeForToken({
+      clientId: pending.clientId,
+      clientSecret: pending.clientSecret,
+      redirectUri: pending.redirectUri,
+      code: params.code,
+      codeVerifier: pending.codeVerifier,
+    });
+    const email = await BigQueryOauth.fetchUserEmail(token.accessToken);
+    session.connectors = {
+      ...(session.connectors ?? {}),
+      bigquery: {
+        email,
+        accessToken: token.accessToken,
+        refreshToken: token.refreshToken,
+        expiresAt: token.expiresAt,
+        clientId: pending.clientId,
+        clientSecret: pending.clientSecret,
+      },
+    };
+    return { sessionId: session.id };
+  },
+
+  /** Whether a BigQuery OAuth session is active for this session (+ the signed-in email). */
+  bigQueryConnected(session: Session): { connected: boolean; email?: string } {
+    const bq = session.connectors?.bigquery;
+    return { connected: Boolean(bq?.accessToken), email: bq?.email };
+  },
+
+  /** List the signed-in account's GCP projects (billing + data project pickers). */
+  async bigQueryListProjects(session: Session): Promise<BigQuery.BigQueryProject[]> {
+    requireAuth(session);
+    return BigQuery.listProjects(await bigQueryAuth(session));
+  },
+
+  /** List datasets in a BigQuery data project. */
+  async bigQueryListDatasets(session: Session, projectId: string): Promise<BigQuery.BigQueryDataset[]> {
+    requireAuth(session);
+    return BigQuery.listDatasets(await bigQueryAuth(session), projectId);
+  },
+
+  /** List tables/views in a BigQuery dataset. */
+  async bigQueryListTables(
+    session: Session,
+    projectId: string,
+    datasetId: string,
+  ): Promise<BigQuery.BigQueryTable[]> {
+    requireAuth(session);
+    return BigQuery.listTables(await bigQueryAuth(session), projectId, datasetId);
+  },
+
+  /**
+   * Describe a BigQuery table's scalar columns (name/type) for the relationship builder's
+   * join-field dropdowns. Returns non-secret field identity only.
+   */
+  async bigQueryDescribeTable(
+    session: Session,
+    projectId: string,
+    datasetId: string,
+    tableId: string,
+  ): Promise<Array<{ name: string; label: string; type: string }>> {
+    requireAuth(session);
+    const fields = await BigQuery.describeTable(await bigQueryAuth(session), projectId, datasetId, tableId);
+    return fields.map((f) => ({ name: f.name, label: f.name, type: f.type }));
+  },
+
+  /**
+   * Build a BigQuery datasource (single table, or multiple tables joined via relationships /
+   * physical join) and publish it to the given Tableau Cloud project, then lock it as the
+   * session's source of truth.
+   *
+   * `materialization: 'live'` publishes a bare `.tds` that queries BigQuery directly over
+   * OAuth (no `<extract>`); nothing runs afterwards. `materialization: 'extract'` queries
+   * the selected tables' rows, materializes them into a local `.hyper` (Python Hyper
+   * sidecar), publishes the packaged `.tdsx`, then (best-effort) embeds the OAuth credential
+   * and kicks off a server-side extract refresh on Tableau Cloud. Both forms embed the
+   * signed-in Google account's saved OAuth credential so the datasource is connectable.
+   */
+  async buildAndPublishBigQueryDatasource(
+    session: Session,
+    input: {
+      billingProjectId: string;
+      dataProjectId: string;
+      dataProjectName: string;
+      datasetId: string;
+      tables: string[];
+      relationships?: BigQueryRelationshipSpec[];
+      mode?: 'relationship' | 'join';
+      materialization?: BigQueryMaterialization;
+      projectId: string;
+      datasourceName: string;
+      overwrite?: boolean;
+    },
+  ): Promise<{
+    datasource: TableauDatasource;
+    lock: DatasourceLock;
+    projectContext: TableauProjectContext;
+    extract: ExtractResult;
+  }> {
+    requireAuth(session);
+    const bq = session.connectors?.bigquery;
+    if (!bq?.accessToken) {
+      throw new AppError('CONNECTOR_API', 'Not signed in to Google BigQuery. Sign in first, then select tables.');
+    }
+    const username = bq.email; // connection username + saved-credential match (captured before clearing state)
+
+    const tables = (input.tables ?? []).map((t) => String(t ?? '').trim());
+    if (tables.length === 0) {
+      throw new AppError('VALIDATION', 'Select at least one BigQuery table to build a datasource.');
+    }
+    if (new Set(tables).size !== tables.length) {
+      throw new AppError('VALIDATION', 'Duplicate BigQuery tables are not allowed.');
+    }
+
+    const project = (await this.listProjects(session)).find((p) => p.id === input.projectId);
+    if (!project) {
+      throw new AppError('NOT_FOUND', 'Target project not found among your accessible projects.');
+    }
+
+    const auth = await bigQueryAuth(session);
+    const maxRows = getConfig().hyper.maxRows;
+    const materialization: BigQueryMaterialization = input.materialization ?? 'extract';
+    const isExtract = materialization === 'extract';
+    const relationships = input.relationships ?? [];
+
+    // Describe every table (and, for an extract, pull its rows for the local `.hyper`).
+    const described: Array<{ table: string; fields: BigQueryField[]; rows: Array<Array<unknown>> }> = [];
+    for (const table of tables) {
+      const fields = await BigQuery.describeTable(auth, input.dataProjectId, input.datasetId, table);
+      if (fields.length === 0) {
+        throw new AppError('CONNECTOR_API', `BigQuery table "${table}" exposes no scalar columns to model.`);
+      }
+      const rows = isExtract
+        ? await BigQuery.queryRows(auth, {
+            billingProjectId: input.billingProjectId,
+            projectId: input.dataProjectId,
+            datasetId: input.datasetId,
+            tableId: table,
+            fields,
+            maxRows,
+          })
+        : [];
+      described.push({ table, fields, rows });
+    }
+
+    // Validate every relationship's join fields exist on the respective tables.
+    const fieldSetByTable = new Map(described.map((d) => [d.table, new Set(d.fields.map((f) => f.name))]));
+    for (const r of relationships) {
+      if (!fieldSetByTable.get(r.leftTable)?.has(r.leftField)) {
+        throw new AppError('VALIDATION', `Join field "${r.leftField}" was not found on table "${r.leftTable}".`);
+      }
+      if (!fieldSetByTable.get(r.rightTable)?.has(r.rightField)) {
+        throw new AppError('VALIDATION', `Join field "${r.rightField}" was not found on table "${r.rightTable}".`);
+      }
+    }
+
+    const conn: BigQueryConnectionInfo = {
+      billingProjectId: input.billingProjectId,
+      dataProjectId: input.dataProjectId,
+      dataProjectName: input.dataProjectName,
+      datasetId: input.datasetId,
+      username,
+    };
+    const tableSpecs: BigQueryTableSpec[] = described.map((d) => ({
+      table: d.table,
+      columns: d.fields.map((f) => ({ name: f.name, bqType: f.type, nillable: f.nillable })),
+    }));
+    const isMulti = described.length > 1;
+    const mode = input.mode ?? 'relationship';
+
+    // Extract packaging path (only used when materialization === 'extract').
+    const hyperName = `federated_${randomBytes(10).toString('hex')}.hyper`;
+    const hyperDbname = `Data/Extracts/${hyperName}`;
+    const extract = isExtract ? { hyperDbname } : undefined;
+
+    let tdsXml: string;
+    if (isMulti) {
+      const relInput = {
+        datasourceName: input.datasourceName,
+        connection: conn,
+        materialization,
+        tables: tableSpecs,
+        relationships,
+        extract,
+      };
+      tdsXml =
+        mode === 'join' ? generateBigQueryPhysicalJoinTds(relInput) : generateBigQueryRelationshipsTds(relInput);
+    } else {
+      tdsXml = generateBigQueryTds({
+        datasourceName: input.datasourceName,
+        connection: conn,
+        materialization,
+        table: described[0]!.table,
+        columns: tableSpecs[0]!.columns,
+        extract,
+      });
+    }
+
+    // Publish: a packaged `.tdsx` (extract) or a bare `.tds` (live). BOTH embed the signed-in
+    // Google account's saved OAuth credential so the datasource is connectable on Tableau Cloud.
+    let published;
+    if (isExtract) {
+      const extractTables: ExtractTable[] = described.map((d) => ({
+        object: bigQueryObjectId(d.table),
+        schema: d.fields.map((f) => ({ name: f.name, type: bigQueryToHyperType(f.type) })) as ExtractColumn[],
+        rows: d.rows,
+      }));
+      const tdsxBuffer = await buildExtractTdsx({ tdsXml, hyperName, tables: extractTables });
+      published = await publishDatasource(getClient(session), {
+        siteId: siteId(session),
+        projectId: project.id,
+        datasourceName: input.datasourceName,
+        tdsxBuffer,
+        overwrite: input.overwrite,
+        connectionCredentials: { name: username, oAuth: true, embed: true },
+      });
+    } else {
+      published = await publishDatasource(getClient(session), {
+        siteId: siteId(session),
+        projectId: project.id,
+        datasourceName: input.datasourceName,
+        tdsXml,
+        overwrite: input.overwrite,
+        connectionCredentials: { name: username, oAuth: true, embed: true },
+      });
+    }
+
+    this.setProjectContext(session, { siteId: siteId(session), projectId: project.id, projectName: project.name });
+
+    const ds: TableauDatasource = {
+      id: published.id,
+      name: published.name,
+      contentUrl: published.contentUrl,
+      projectId: published.projectId,
+      projectName: published.projectName,
+    };
+    const lock = this.lockDatasource(session, ds);
+
+    // Cache the field identities so the dashboard flow has real fields immediately, matching
+    // the published datasource's disambiguated column names.
+    session.flow.connectorMetadata = {
+      ...(session.flow.connectorMetadata ?? {}),
+      [ds.id]: bigQueryTablesToMetadata(ds.id, ds.name, tableSpecs),
+    };
+
+    // Discard the transient BigQuery OAuth state now that publishing is complete.
+    session.connectors = undefined;
+
+    // Embed the saved Google OAuth credential on the published connection(s) (matched by
+    // email) so the datasource is connectable / refreshable. Best-effort — a failure must NOT
+    // fail the publish (a live datasource is already published; an extract already has data).
+    try {
+      const conns = await listDatasourceConnections(getClient(session), siteId(session), ds.id);
+      for (const c of conns) {
+        await embedDatasourceConnectionCredential(getClient(session), siteId(session), ds.id, c.id, {
+          userName: username,
+        });
+      }
+    } catch (err) {
+      log.warn('Could not embed saved Google credential on datasource connection after publish', {
+        datasourceId: ds.id,
+        error: err instanceof AppError ? err.message : String(err),
+      });
+    }
+
+    // LIVE: nothing further — Tableau queries BigQuery directly. EXTRACT: kick off a
+    // server-side "Update Data Source Now" so Tableau Cloud rebuilds the extract from the
+    // live BigQuery connection using the embedded credential. Best-effort.
+    let refreshNote = '';
+    if (isExtract) {
+      try {
+        const { jobId } = await refreshDatasourceNow(getClient(session), siteId(session), ds.id);
+        refreshNote = jobId
+          ? ` Started a server-side extract refresh (job ${jobId}).`
+          : ' Started a server-side extract refresh.';
+      } catch (err) {
+        log.warn('Could not start BigQuery extract refresh after publish', {
+          datasourceId: ds.id,
+          error: err instanceof AppError ? err.message : String(err),
+        });
+        refreshNote =
+          ' Note: could not start the extract refresh automatically — verify your saved Google BigQuery credential on Tableau Cloud, then use "Refresh Extracts" on the datasource.';
+      }
+    }
+
+    const tableSummary = isMulti ? ` across ${described.length} tables` : '';
+    let message: string;
+    if (isExtract) {
+      const totalRows = described.reduce((sum, d) => sum + d.rows.length, 0);
+      const anyCapped = described.some((d) => d.rows.length >= maxRows);
+      message =
+        `Extract built with ${totalRows.toLocaleString()} row(s)${tableSummary}` +
+        `${anyCapped ? ` (some tables capped at ${maxRows.toLocaleString()})` : ''}.${refreshNote}`;
+    } else {
+      message = `Published a LIVE BigQuery datasource${tableSummary}. Tableau Cloud queries BigQuery directly over OAuth.`;
+    }
+    const extractResult: ExtractResult = { state: 'succeeded', message };
+    return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract: extractResult };
   },
 
   async checkProjectPublish(session: Session, project: TableauProjectContext): Promise<PermissionResult> {

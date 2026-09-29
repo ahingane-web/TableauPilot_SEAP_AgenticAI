@@ -30,6 +30,7 @@ import {
   SalesforceCredentialsSchema,
   SalesforceBuildSchema,
   ExcelBuildSchema,
+  BigQueryBuildSchema,
   FitModeSchema,
 } from '../schemas/common.js';
 import { ReferenceLineSpecSchema, ColorMapSpecSchema, GrandTotalsSchema } from '../schemas/worksheetSpec.js';
@@ -81,6 +82,27 @@ function zodIssues(err: z.ZodError): string[] {
 function oauthResultHtml(result: { ok: boolean; message?: string }): string {
   const payload = JSON.stringify({ type: 'sf-oauth', ok: result.ok, message: result.message ?? '' });
   const heading = result.ok ? 'Salesforce connected' : 'Salesforce sign-in failed';
+  const detail = result.ok
+    ? 'You can close this window and return to TableauPilot.'
+    : escapeHtml(result.message ?? 'Please try again.');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title></head>
+<body style="font-family:system-ui,sans-serif;padding:24px;color:#1a1a1a">
+<h3>${heading}</h3><p>${detail}</p>
+<script>
+  try { if (window.opener) window.opener.postMessage(${payload}, '*'); } catch (e) {}
+  setTimeout(function(){ window.close(); }, 800);
+</script>
+</body></html>`;
+}
+
+/**
+ * The BigQuery equivalent of {@link oauthResultHtml}: rendered on the Google OAuth callback,
+ * it notifies the opener window (via `postMessage` with `type: 'bq-oauth'`) and closes the
+ * popup. Kept separate so the Salesforce OAuth result page is untouched.
+ */
+function bigQueryOauthResultHtml(result: { ok: boolean; message?: string }): string {
+  const payload = JSON.stringify({ type: 'bq-oauth', ok: result.ok, message: result.message ?? '' });
+  const heading = result.ok ? 'Google BigQuery connected' : 'Google sign-in failed';
   const detail = result.ok
     ? 'You can close this window and return to TableauPilot.'
     : escapeHtml(result.message ?? 'Please try again.');
@@ -271,15 +293,18 @@ export function createApp(): Hono {
   app.get('/api/connectors', (c) => {
     requireSession(c);
     const sf = getConfig().salesforce;
-    // `oauthConfigured` tells the UI whether the server holds a Connected App, so it
-    // can render a single "Sign in with Salesforce" button (like Tableau's connector)
-    // instead of asking the user for a Consumer Key/Secret.
+    const bq = getConfig().bigquery;
+    // `oauthConfigured` tells the UI whether the server holds a pre-registered OAuth client,
+    // so it can render a single "Sign in" button (like Tableau's connector) instead of asking
+    // the user for a client id/secret.
     const oauthConfigured = Boolean(sf.oauthClientId);
-    const items = TableauService.listConnectors().map((it) =>
-      it.id === 'salesforce'
-        ? { ...it, oauthRedirectUri: sf.oauthRedirectUri, oauthConfigured }
-        : it,
-    );
+    const bqOauthConfigured = Boolean(bq.oauthClientId);
+    const items = TableauService.listConnectors().map((it) => {
+      if (it.id === 'salesforce') return { ...it, oauthRedirectUri: sf.oauthRedirectUri, oauthConfigured };
+      if (it.id === 'bigquery')
+        return { ...it, oauthRedirectUri: bq.oauthRedirectUri, oauthConfigured: bqOauthConfigured };
+      return it;
+    });
     return c.json({ items });
   });
 
@@ -458,6 +483,174 @@ export function createApp(): Hono {
       sheets: parsed.data.sheets,
       relationships: parsed.data.relationships,
       mode: parsed.data.mode,
+      projectId: parsed.data.projectId,
+      datasourceName: parsed.data.datasourceName,
+      overwrite: Boolean(parsed.data.overwrite),
+    });
+    return c.json({
+      datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },
+      extract: { state: result.extract.state, message: result.extract.message },
+      ...contextSnapshot(session),
+    });
+  });
+
+  // -------------------------------------------------- BigQuery connector (Build datasource)
+  // Interactive Google OAuth (browser sign-in), then list billing-project > project >
+  // dataset > tables, describe fields for the relationship builder, and build + publish a
+  // LIVE or EXTRACT datasource. Salesforce/Excel routes are untouched.
+
+  // Begin browser OAuth. The agent opens `authUrl` in a popup; Google redirects to the
+  // callback below.
+  app.post('/api/connectors/bigquery/oauth/start', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req
+      .json<{ clientId?: string; clientSecret?: string }>()
+      .catch(() => ({}) as { clientId?: string; clientSecret?: string });
+    const { authUrl, redirectUri } = TableauService.bigQueryOauthStart(session, {
+      clientId: body.clientId?.trim() || undefined,
+      clientSecret: body.clientSecret?.trim() || undefined,
+    });
+    return c.json({ authUrl, redirectUri });
+  });
+
+  // Read the vault-saved Google OAuth client for the BigQuery connector (non-secret: client id
+  // + whether a secret is stored), plus whether the server also has one configured via env.
+  app.get('/api/connectors/bigquery/oauth/client', (c) => {
+    const session = requireSession(c);
+    const saved = VaultService.getBigQueryOAuthClient(session);
+    return c.json({
+      clientId: saved.clientId ?? '',
+      hasSecret: Boolean(saved.clientSecret),
+      envConfigured: Boolean(getConfig().bigquery.oauthClientId),
+    });
+  });
+
+  // Save (or clear) the Google OAuth client id/secret in the user's vault so it persists across
+  // sessions. This is the app-registration credential, encrypted at rest — NOT the access token.
+  app.post('/api/connectors/bigquery/oauth/client', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req
+      .json<{ clientId?: string; clientSecret?: string }>()
+      .catch(() => ({}) as { clientId?: string; clientSecret?: string });
+    const summary = VaultService.saveBigQueryOAuthClient(session, {
+      clientId: String(body.clientId ?? ''),
+      clientSecret: body.clientSecret ? String(body.clientSecret) : undefined,
+    });
+    return c.json({
+      saved: true,
+      clientId: summary.bigQueryOAuthClientId ?? '',
+      hasSecret: Boolean(summary.bigQueryOAuthHasSecret),
+    });
+  });
+
+  // OAuth redirect target (no session header — routed back via `state`). Renders a tiny page
+  // that notifies the opener window and closes the popup.
+  app.get('/api/connectors/bigquery/oauth/callback', async (c) => {
+    const code = c.req.query('code');
+    const state = c.req.query('state');
+    const oauthError = c.req.query('error_description') ?? c.req.query('error');
+    try {
+      if (oauthError) throw new AppError('AUTH_FAILED', `Google sign-in was cancelled or failed: ${oauthError}`);
+      if (!code || !state) throw new AppError('VALIDATION', 'Missing OAuth code/state from Google.');
+      await TableauService.completeBigQueryOauth({ code, state });
+      return c.html(bigQueryOauthResultHtml({ ok: true }));
+    } catch (err) {
+      const safe = sanitizeError(err);
+      return c.html(bigQueryOauthResultHtml({ ok: false, message: safe.message }), safe.status as 400);
+    }
+  });
+
+  // Whether a BigQuery OAuth session is active (used by the UI after the popup completes).
+  app.get('/api/connectors/bigquery/status', (c) => {
+    const session = requireSession(c);
+    return c.json(TableauService.bigQueryConnected(session));
+  });
+
+  // List the signed-in account's GCP projects (billing + data project pickers).
+  app.get('/api/connectors/bigquery/projects', async (c) => {
+    const session = requireSession(c);
+    const projects = await TableauService.bigQueryListProjects(session);
+    return c.json({ projects });
+  });
+
+  // List datasets in a BigQuery data project.
+  app.get('/api/connectors/bigquery/datasets', async (c) => {
+    const session = requireSession(c);
+    const projectId = String(c.req.query('projectId') ?? '').trim();
+    if (!projectId) throw new AppError('VALIDATION', 'Provide a BigQuery projectId.');
+    const datasets = await TableauService.bigQueryListDatasets(session, projectId);
+    return c.json({ datasets });
+  });
+
+  // List tables/views in a BigQuery dataset.
+  app.get('/api/connectors/bigquery/tables', async (c) => {
+    const session = requireSession(c);
+    const projectId = String(c.req.query('projectId') ?? '').trim();
+    const datasetId = String(c.req.query('datasetId') ?? '').trim();
+    if (!projectId || !datasetId) throw new AppError('VALIDATION', 'Provide a BigQuery projectId and datasetId.');
+    const tables = await TableauService.bigQueryListTables(session, projectId, datasetId);
+    return c.json({ tables });
+  });
+
+  // Describe a BigQuery table's columns (name/label/type) for the relationship builder.
+  app.post('/api/connectors/bigquery/describe', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ projectId?: string; datasetId?: string; table?: string }>();
+    const projectId = String(body.projectId ?? '').trim();
+    const datasetId = String(body.datasetId ?? '').trim();
+    const table = String(body.table ?? '').trim();
+    if (!projectId || !datasetId || !table) {
+      throw new AppError('VALIDATION', 'Provide a BigQuery projectId, datasetId, and table to describe.');
+    }
+    const fields = await TableauService.bigQueryDescribeTable(session, projectId, datasetId, table);
+    return c.json({ fields });
+  });
+
+  // Build + publish a BigQuery datasource (LIVE or EXTRACT).
+  app.post('/api/connectors/bigquery/publish', async (c) => {
+    const session = requireSession(c);
+    const raw = await c.req.json<{
+      billingProjectId?: string;
+      dataProjectId?: string;
+      dataProjectName?: string;
+      datasetId?: string;
+      tables?: unknown;
+      relationships?: unknown;
+      mode?: unknown;
+      materialization?: unknown;
+      projectId?: string;
+      datasourceName?: string;
+      overwrite?: boolean;
+    }>();
+    const parsed = BigQueryBuildSchema.safeParse({
+      billingProjectId: raw.billingProjectId,
+      dataProjectId: raw.dataProjectId,
+      dataProjectName: raw.dataProjectName,
+      datasetId: raw.datasetId,
+      tables: Array.isArray(raw.tables) ? raw.tables : [],
+      relationships: Array.isArray(raw.relationships) ? raw.relationships : [],
+      ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+      ...(raw.materialization !== undefined ? { materialization: raw.materialization } : {}),
+      projectId: raw.projectId,
+      datasourceName: raw.datasourceName,
+      overwrite: raw.overwrite,
+    });
+    if (!parsed.success) {
+      throw new AppError(
+        'VALIDATION',
+        'Invalid BigQuery datasource request. Check the billing project, project, dataset, tables, relationships, project, and name.',
+        { details: { issues: zodIssues(parsed.error) } },
+      );
+    }
+    const result = await TableauService.buildAndPublishBigQueryDatasource(session, {
+      billingProjectId: parsed.data.billingProjectId,
+      dataProjectId: parsed.data.dataProjectId,
+      dataProjectName: parsed.data.dataProjectName,
+      datasetId: parsed.data.datasetId,
+      tables: parsed.data.tables,
+      relationships: parsed.data.relationships,
+      mode: parsed.data.mode,
+      materialization: parsed.data.materialization,
       projectId: parsed.data.projectId,
       datasourceName: parsed.data.datasourceName,
       overwrite: Boolean(parsed.data.overwrite),

@@ -43,7 +43,7 @@ cp .env.example .env
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # for VAULT_PEPPER
 
 # (optional) for the extract-datasource builders — creates .venv-hyper with the
-# Tableau Hyper API (Python). Needed for the Salesforce and Excel connectors.
+# Tableau Hyper API (Python). Needed for the Salesforce, Excel, and BigQuery-extract connectors.
 npm run setup:hyper
 ```
 
@@ -59,8 +59,9 @@ Key env vars (full list + comments in [.env.example](./.env.example)):
 | `VAULT_PEPPER` | **required** server-only pepper for the PIN KDF |
 | `DATA_PATH` | encrypted vault + storage dir (git-ignored) |
 | `API_PORT` / `WEB_PORT` / `CORS_ORIGINS` | app wiring |
-| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce + Excel connectors) |
+| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce, Excel + BigQuery-extract connectors) |
 | `SALESFORCE_OAUTH_CLIENT_ID` / `SALESFORCE_OAUTH_CLIENT_SECRET` / `SALESFORCE_OAUTH_REDIRECT_URI` | Salesforce browser-OAuth (optional; username/password works without them) |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` | Google BigQuery browser-OAuth (**optional** — if unset, the UI asks for the Client ID/secret at sign-in and can save it encrypted in the user's vault; redirect defaults to `…/api/connectors/bigquery/oauth/callback`) |
 
 Per-user **Tableau credentials are never in `.env`** — you enter them in the app and
 they're stored in the encrypted vault.
@@ -142,6 +143,9 @@ stay server-side.
 - `GET /api/connectors`, `POST /api/connectors/salesforce/{connect,describe,publish}`,
   `POST /api/connectors/salesforce/oauth/start`, `GET /api/connectors/salesforce/{tables,oauth/callback}`
 - `POST /api/connectors/excel/upload` (multipart `.xlsx`/`.xlsm`), `POST /api/connectors/excel/publish` (extract-only)
+- `POST /api/connectors/bigquery/oauth/start`, `GET /api/connectors/bigquery/{oauth/callback,status,projects,datasets,tables}`,
+  `GET|POST /api/connectors/bigquery/oauth/client` (save/read the per-user OAuth client in the vault),
+  `POST /api/connectors/bigquery/{describe,publish}` (Google BigQuery, **live or extract**)
 
 ## Testing
 

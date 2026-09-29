@@ -15,6 +15,9 @@ export interface CredentialSummary {
   hasPatSecret: boolean;
   hasConnectedApp: boolean;
   connectedAppClientId?: string;
+  hasBigQueryOAuth: boolean;
+  bigQueryOAuthClientId?: string;
+  bigQueryOAuthHasSecret?: boolean;
 }
 
 export interface SessionContext {

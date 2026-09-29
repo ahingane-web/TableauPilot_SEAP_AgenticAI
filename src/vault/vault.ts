@@ -199,6 +199,54 @@ export const VaultService = {
     return session.credentials ? summarizeCredentials(session.credentials) : null;
   },
 
+  /**
+   * Persist (or clear) the BigQuery connector's Google OAuth *client* id/secret, merged into
+   * the user's saved credentials and re-encrypted with the session vault key (no PIN re-entry,
+   * mirroring `saveCredentials`). This is the app-registration credential, NOT the per-user
+   * access token. Passing an empty `clientId` removes it. Requires Tableau credentials to have
+   * been saved first (the vault blob is keyed to the user's saved connection).
+   */
+  saveBigQueryOAuthClient(
+    session: Session,
+    input: { clientId: string; clientSecret?: string },
+  ): CredentialSummary {
+    const record = getRecord(session.username);
+    if (!record) throw new AppError('AUTH_REQUIRED', 'Session user no longer exists.');
+    if (!session.credentials) {
+      throw new AppError('AUTH_REQUIRED', 'Save your Tableau connection details first, then save the BigQuery client.', {
+        hint: 'Connect to Tableau Cloud (save credentials) before storing the BigQuery OAuth client.',
+      });
+    }
+    const clientId = input.clientId.trim();
+    let clientSecret = input.clientSecret?.trim();
+    // Preserve a previously-saved secret when the caller omits one for the SAME client id
+    // (the UI never prefills the secret field, so a blank submit must not wipe it).
+    const existing = session.credentials.bigQueryOAuth;
+    if (!clientSecret && existing?.clientId === clientId && existing?.clientSecret) {
+      clientSecret = existing.clientSecret;
+    }
+    const next: TableauCredentials = {
+      ...session.credentials,
+      bigQueryOAuth: clientId ? { clientId, ...(clientSecret ? { clientSecret } : {}) } : undefined,
+    };
+    record.creds = encrypt(session.vaultKey, JSON.stringify(next));
+    record.updatedAt = nowIso();
+    putRecord(record);
+    session.credentials = next;
+    log.info('Saved BigQuery OAuth client to vault', {
+      username: session.username,
+      hasClient: Boolean(clientId),
+      hasSecret: Boolean(clientSecret),
+    });
+    return summarizeCredentials(next);
+  },
+
+  /** Read the saved BigQuery OAuth client from the live session (secret included; server-only). */
+  getBigQueryOAuthClient(session: Session): { clientId?: string; clientSecret?: string } {
+    const bq = session.credentials?.bigQueryOAuth;
+    return { clientId: bq?.clientId, clientSecret: bq?.clientSecret };
+  },
+
   /** Read decrypted credentials from the live session (never from disk on demand). */
   getCredentials(session: Session): TableauCredentials {
     if (!session.credentials) {

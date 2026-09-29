@@ -215,6 +215,70 @@ export const api = {
       }
     >('/api/connectors/excel/publish', { method: 'POST', body }),
 
+  // ---- BigQuery connector ----
+  // Interactive Google OAuth (browser sign-in): start returns the authorize URL to open in a popup.
+  bigQueryOauthStart: (body: { clientId?: string; clientSecret?: string } = {}) =>
+    req<{ authUrl: string; redirectUri: string }>('/api/connectors/bigquery/oauth/start', { method: 'POST', body }),
+  // Read the vault-saved Google OAuth client (non-secret) + whether the server has one via env.
+  bigQueryOAuthClientGet: () =>
+    req<{ clientId: string; hasSecret: boolean; envConfigured: boolean }>('/api/connectors/bigquery/oauth/client'),
+  // Save (or clear) the Google OAuth client id/secret in the user's vault (encrypted at rest).
+  bigQueryOAuthClientSave: (body: { clientId: string; clientSecret?: string }) =>
+    req<{ saved: boolean; clientId: string; hasSecret: boolean }>('/api/connectors/bigquery/oauth/client', {
+      method: 'POST',
+      body,
+    }),
+  // Whether a BigQuery OAuth session is active (polled after the popup completes).
+  bigQueryStatus: () => req<{ connected: boolean; email?: string }>('/api/connectors/bigquery/status'),
+  // List the signed-in account's GCP projects (billing + data project pickers).
+  bigQueryProjects: () =>
+    req<{ projects: { id: string; name: string }[] }>('/api/connectors/bigquery/projects'),
+  // List datasets in a BigQuery data project.
+  bigQueryDatasets: (projectId: string) =>
+    req<{ datasets: { id: string; location?: string }[] }>(
+      `/api/connectors/bigquery/datasets?projectId=${encodeURIComponent(projectId)}`,
+    ),
+  // List tables/views in a BigQuery dataset.
+  bigQueryTables: (projectId: string, datasetId: string) =>
+    req<{ tables: { id: string; type?: string }[] }>(
+      `/api/connectors/bigquery/tables?projectId=${encodeURIComponent(projectId)}&datasetId=${encodeURIComponent(datasetId)}`,
+    ),
+  // Describe a BigQuery table's columns (name/label/type) for the relationship builder.
+  bigQueryDescribe: (projectId: string, datasetId: string, table: string) =>
+    req<{ fields: { name: string; label: string; type: string }[] }>('/api/connectors/bigquery/describe', {
+      method: 'POST',
+      body: { projectId, datasetId, table },
+    }),
+  // Build + publish a BigQuery datasource (single table, or tables joined via relationships/
+  // physical join). `materialization` selects a LIVE connection or a materialized extract.
+  bigQueryPublish: (body: {
+    billingProjectId: string;
+    dataProjectId: string;
+    dataProjectName: string;
+    datasetId: string;
+    /** One table id = single-table; multiple = relationships/join datasource. */
+    tables: string[];
+    relationships?: Array<{
+      leftTable: string;
+      leftField: string;
+      rightTable: string;
+      rightField: string;
+      cardinality?: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+      joinType?: 'inner' | 'left' | 'right' | 'full';
+    }>;
+    mode?: 'relationship' | 'join';
+    materialization?: 'live' | 'extract';
+    projectId: string;
+    datasourceName: string;
+    overwrite?: boolean;
+  }) =>
+    req<
+      SessionContext & {
+        datasource: { id: string; name: string; projectName?: string };
+        extract: { state: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
+      }
+    >('/api/connectors/bigquery/publish', { method: 'POST', body }),
+
   plan: (request: string, workbookName?: string) =>
     req<PlanningResult>('/api/dashboard/plan', { method: 'POST', body: { request, workbookName } }),
   /** Chat: revise the current (unpublished) plan via a natural-language instruction. */

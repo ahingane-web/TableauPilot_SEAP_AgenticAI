@@ -347,6 +347,146 @@ export const ExcelBuildSchema = z
   });
 export type ExcelBuildInput = z.infer<typeof ExcelBuildSchema>;
 
+// ---------------------------------------------------------------------------------------
+// BigQuery connector (Build-datasource flow). BigQuery table/column names may contain
+// spaces or hyphens (e.g. `Order Date`, `Sub-Category`), so — unlike Salesforce/Excel —
+// these schemas allow a looser grammar. Nothing here changes the Salesforce/Excel schemas.
+// ---------------------------------------------------------------------------------------
+
+/** A GCP project id (billing or data project), e.g. `tableauagent-510111`. */
+export const BigQueryProjectIdSchema = z
+  .string()
+  .trim()
+  .regex(/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/i, 'Expected a Google Cloud project id, e.g. my-project-123');
+
+/** A BigQuery dataset id, e.g. `TableauAgentDataset`. */
+export const BigQueryDatasetIdSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z0-9_]{1,1024}$/, 'Expected a BigQuery dataset id (letters, numbers, underscores)');
+
+/** A BigQuery table id — may contain spaces, hyphens, and `$` (e.g. `Orders`, `Order Data`). */
+export const BigQueryTableNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1024)
+  .regex(/^[A-Za-z0-9_][A-Za-z0-9_ $-]*$/, 'Expected a BigQuery table id');
+
+/** A BigQuery column name — may contain spaces/hyphens; only brackets/newlines are disallowed. */
+export const BigQueryFieldNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1024)
+  .regex(/^[^[\]\r\n]+$/, 'Expected a BigQuery column name');
+
+/** Which data-access shape to publish for a BigQuery datasource. */
+export const BigQueryMaterializationSchema = z.enum(['live', 'extract']);
+export type BigQueryMaterialization = z.infer<typeof BigQueryMaterializationSchema>;
+
+/**
+ * A single BigQuery relationship (data-modeling edge). `leftTable`/`rightTable` must both
+ * appear in the build's `tables`. `cardinality` is consumed by the relationships model;
+ * `joinType` by the physical-join model — the build's `mode` selects which one wins. Reuses
+ * the Salesforce cardinality/join-type enums (they are connector-agnostic).
+ */
+export const BigQueryRelationshipSchema = z.object({
+  leftTable: BigQueryTableNameSchema,
+  leftField: BigQueryFieldNameSchema,
+  rightTable: BigQueryTableNameSchema,
+  rightField: BigQueryFieldNameSchema,
+  cardinality: SalesforceCardinalitySchema.default('many-to-many'),
+  joinType: SalesforceJoinTypeSchema.default('left'),
+});
+export type BigQueryRelationship = z.infer<typeof BigQueryRelationshipSchema>;
+
+/**
+ * Payload for building a BigQuery datasource (live or extract) from an OAuth-connected
+ * BigQuery session. `tables` are BigQuery table ids in the selected
+ * billing-project > project > dataset. A single-table build sends `tables: [id],
+ * relationships: []`; multi-table builds must provide relationships that connect every
+ * table into one graph — identical connectivity rules to {@link SalesforceBuildSchema}.
+ * `materialization` selects a live connection or a locally-materialized extract.
+ */
+export const BigQueryBuildSchema = z
+  .object({
+    /** BigQuery billing/execution project id (`EXECCATALOG`). */
+    billingProjectId: BigQueryProjectIdSchema,
+    /** BigQuery data project id (`CATALOG`). */
+    dataProjectId: BigQueryProjectIdSchema,
+    /** BigQuery data project DISPLAY name (connection `project` attribute). */
+    dataProjectName: z.string().trim().min(1),
+    /** BigQuery dataset id (connection `schema`). */
+    datasetId: BigQueryDatasetIdSchema,
+    /** Selected BigQuery table ids. One = single-table; many = relationships/join. */
+    tables: z.array(BigQueryTableNameSchema).min(1, 'Select at least one BigQuery table'),
+    relationships: z.array(BigQueryRelationshipSchema).default([]),
+    mode: SalesforceBuildModeSchema.default('relationship'),
+    materialization: BigQueryMaterializationSchema.default('extract'),
+    /** Target Tableau project id to publish into. */
+    projectId: z.string().trim().min(1, 'Select a Tableau project/folder to publish into'),
+    datasourceName: z.string().trim().min(1, 'Provide a name for the new datasource'),
+    overwrite: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const tables = val.tables.map((t) => t.trim());
+    const unique = new Set(tables);
+    if (unique.size !== tables.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['tables'], message: 'Duplicate tables are not allowed.' });
+    }
+    if (tables.length === 1) {
+      if (val.relationships.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships'],
+          message: 'A single-table datasource cannot have relationships.',
+        });
+      }
+      return;
+    }
+    for (const [i, r] of val.relationships.entries()) {
+      if (!unique.has(r.leftTable.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'leftTable'],
+          message: `Relationship references "${r.leftTable}", which is not one of the selected tables.`,
+        });
+      }
+      if (!unique.has(r.rightTable.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'rightTable'],
+          message: `Relationship references "${r.rightTable}", which is not one of the selected tables.`,
+        });
+      }
+      if (r.leftTable.trim() === r.rightTable.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i],
+          message: 'A relationship must connect two different tables.',
+        });
+      }
+    }
+    if (val.relationships.length < tables.length - 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: `Need at least ${tables.length - 1} relationship(s) to connect ${tables.length} tables.`,
+      });
+      return;
+    }
+    const edges = val.relationships.map((r) => ({ leftObject: r.leftTable.trim(), rightObject: r.rightTable.trim() }));
+    if (!isConnected(tables, edges)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: 'The relationships must connect every table into a single joined model.',
+      });
+    }
+  });
+export type BigQueryBuildInput = z.infer<typeof BigQueryBuildSchema>;
+
 /** Union-find connectivity check: do the relationship edges connect all tables? */
 function isConnected(tables: string[], relationships: Array<{ leftObject: string; rightObject: string }>): boolean {
   const parent = new Map<string, string>();

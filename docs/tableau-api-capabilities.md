@@ -18,6 +18,7 @@ every capability to one of five buckets.
 | **Build a Salesforce extract datasource** | Local `.hyper` + `.tds` → REST publish `.tdsx` | ✅ Category A-gen |
 | Model Salesforce objects (relationships / physical joins) | Deterministic `.tds` generation | ✅ Category A-gen |
 | **Build an Excel extract-only datasource** | `exceljs` parse → local `.hyper` + `excel-direct` `.tds` → REST publish `.tdsx` (no credential/refresh) | ✅ Category A-gen |
+| **Build a Google BigQuery datasource (live or extract)** | BigQuery REST describe/query → `class='bigquery'` OAuth `.tds` (live) or local `.hyper` `.tdsx` (extract) → REST publish + embed OAuth cred | ✅ Category A-gen |
 | Embed saved credential on a datasource connection | REST Update-Connection (`embedPassword`) | ✅ Category A |
 | Refresh a published extract | REST `POST /datasources/{id}/refresh` | ✅ Category A |
 | Server-side extract creation from a live datasource | `createExtract` background job | ❌ unsupported on target site (see below) |
@@ -66,6 +67,30 @@ for lineage and is never read on Tableau Cloud; the datasource is viewable immed
 refreshable without re-publishing. This reuses `publishDatasource` (which already makes
 `connectionCredentials` optional), skipping `embedDatasourceConnectionCredential`/
 `refreshDatasourceNow`.
+
+## Category A-gen — Compile a Google BigQuery datasource (live OR extract)
+
+The BigQuery connector authenticates via **Google browser OAuth (PKCE)** and reads projects/
+datasets/tables/columns over pure-fetch BigQuery + Cloud Resource Manager REST. It compiles the
+SAME `.tds` shapes (single / relationships object-graph / physical join) as Salesforce/Excel,
+but with a `class='bigquery'`, `authentication='oauth'`, `connection-dialect='google-sql'`
+named-connection and `[<project>.<dataset>].[<table>]` relations, reconciled against
+`reference/BigQueryDataset{Live,Extract}.tds`. Because BigQuery column names may contain spaces/
+hyphens, the generator keeps the **real** name as the connection `remote-name`/`remote-alias`
+and assigns disambiguated `local-name`s.
+
+**Two materializations:**
+- **Live** — publish a bare `.tds` (no `<extract>`; manifest omits `ObjectModelExtractV2`;
+  object-graph carries only `context=''`). Tableau queries BigQuery directly over the embedded
+  OAuth credential; the app runs **no refresh** after publish.
+- **Extract** — query rows (`jobs.query` against the billing project), materialize a local
+  `.hyper` `.tdsx` (Python Hyper sidecar), publish, embed the OAuth credential, and trigger
+  `refreshDatasourceNow` (best-effort — the bundled `.hyper` already holds queried data).
+
+**Credential embed (both shapes).** After publish, `embedDatasourceConnectionCredential` embeds
+the signed-in Google account's **saved BigQuery OAuth credential** on Tableau Cloud (matched by
+email, `oAuth: true`), so the datasource is connectable/refreshable by Tableau — the app's own
+Google token stays transient and in-memory.
 
 **Why build the `.hyper` locally?** Server-side extract creation from a live datasource
 was tried and failed on the target Cloud site — `createExtract` returns *"REST API does

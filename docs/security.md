@@ -2,8 +2,10 @@
 
 ## Threat model & goals
 
-1. Tableau secrets (PAT secret, Connected App secret, REST token) must **never** reach
-   the browser, the LLM, logs, traces, Mastra memory, or workflow state.
+1. Secrets (Tableau PAT secret, Connected App secret, REST token; connector source
+   credentials/tokens such as Salesforce creds and the Google BigQuery OAuth token; and any
+   saved OAuth client secret) must **never** reach the browser, the LLM, logs, traces, Mastra
+   memory, or workflow state.
 2. Credentials at rest must be unreadable without the user's PIN.
 3. A 6-digit PIN is low entropy, so brute force must be economically infeasible and
    rate-limited.
@@ -81,6 +83,30 @@
   server-side refresh). There is no live connection to authenticate.
 - **Same sidecar hygiene.** Extract packaging reuses `hyperPackager.ts`, so the sidecar
   still receives only **temp-file paths** on argv and the temp directory is always removed.
+
+## Google BigQuery connector
+
+- **Token is transient only.** The Google OAuth **access/refresh token** and the signed-in
+  email are held **in-memory** on `session.connectors.bigquery`, used only to list
+  projects/datasets/tables, describe columns, and (for an extract) query rows, and are
+  **cleared once publishing completes**. The token is never persisted to the vault, never sent
+  to the browser or the LLM, and never logged (`src/bigquery/*` redacts).
+- **Client id/secret are the only persisted piece — and only if the user opts in.** The OAuth
+  **client** id/secret (the app-registration credential, analogous to the Tableau Connected App
+  secret — *not* a user data token) may be saved **encrypted in the user's vault**
+  (`TableauCredentials.bigQueryOAuth`, AES-256-GCM under the PIN key) so it need not be re-entered.
+  It never reaches the browser (the client only learns the non-secret client id + a "has secret"
+  flag) and is resolved server-side in the order request → vault → `GOOGLE_OAUTH_*`.
+- **OAuth (PKCE).** The browser flow uses PKCE; the pending `state`/verifier + client id/secret
+  live in a short-TTL, single-use map (`src/bigquery/oauthStore.ts`) that routes the header-less
+  callback back to the originating session. Scopes are least-privilege (`openid email`,
+  `.../auth/bigquery`, `.../auth/cloudplatformprojects.readonly`), matching Tableau's own connector.
+- **Email is derived, not asked.** The connection username/email comes from OpenID `userinfo`;
+  it is used to match the publisher's **saved Google BigQuery OAuth credential** on Tableau Cloud
+  (embedded by username on the datasource connection) — a Cloud-side stored credential, not a
+  secret this app holds. **No Google credential is ever baked into the `.tds`/`.hyper`.**
+- **Same sidecar hygiene.** Extract mode reuses `hyperPackager.ts` (temp-file paths on argv only,
+  temp dir always removed); **Live** mode publishes a bare `.tds` and touches no `.hyper`.
 
 ## Operational guidance
 
