@@ -1,7 +1,7 @@
 # Design — TableauPilot AI
 
 > Living document. Update this whenever module interfaces, schemas, algorithms, or
-> code-level decisions change. Last updated: 2026-09-29.
+> code-level decisions change. Last updated: 2026-09-30.
 
 This is the module-level design. For the big picture see
 [architecture.md](./architecture.md); for binding rules see [rules.md](./rules.md).
@@ -72,6 +72,23 @@ tableauAuth, flow }`; `createSession/getSession/destroySession/startSessionSweep
   `SalesforceRelationshipSchema`, mode, projectId, datasourceName, overwrite?) with the
   same union-find connectivity `.superRefine` as Salesforce (only the noun differs). No
   credentials (extract-only).
+- **Google BigQuery connector** (in `common.ts`): `BigQueryMaterializationSchema`
+  (`live|extract`, default `extract`), `BigQueryRelationshipSchema` (`leftTable`/`rightTable`),
+  and `BigQueryBuildSchema` (billing/project/dataset, tables[min 1], relationships[], mode,
+  materialization, projectId, datasourceName, overwrite?) with the same union-find
+  connectivity `.superRefine`.
+- **Salesforce Data Cloud connector** (in `common.ts`): `DataCloudObjectCategorySchema`
+  (`dmo|dlo|ci|all`), `DataCloudMaterializationSchema` (`live|extract`, default `extract`),
+  `DataCloudRelationshipSchema` (leftObject/rightObject like Salesforce), and
+  `DataCloudBuildSchema` (credentials, dataSpace, category, tables[min 1], relationships[],
+  mode, materialization, projectId, datasourceName, overwrite?) with the same union-find
+  connectivity `.superRefine` as Salesforce.
+- **Snowflake connector** (in `common.ts`): `SnowflakeCredentialsSchema`,
+  `SnowflakeMaterializationSchema` (`live|extract`, default `extract`),
+  `SnowflakeRelationshipSchema` (`leftTable`/`rightTable`), and `SnowflakeBuildSchema`
+  (credentials, warehouse, database, schema, tables[min 1], relationships[], mode,
+  materialization, projectId, datasourceName, overwrite?) with the same union-find
+  connectivity `.superRefine` (maps `leftTable` → `leftObject` for `isConnected`).
 
 **Decision:** the LLM produces a *draft* (no publishing/datasource). The server injects
 the locked datasource + approved project so the model can't redirect output.
@@ -296,6 +313,98 @@ Google OAuth credential → best-effort embed on the connection(s) → **extract
 near expiry. Transient state lives on `session.connectors.bigquery` (email + access/refresh token
 + OAuth client) and is cleared after publish.
 
+## 5e. Salesforce Data Cloud connector — live OR extract datasource builder
+
+A fourth "Build datasource" entry point that signs in with the **same Salesforce
+username/password form** as CRM Salesforce (SOAP `login` imported unmodified — not OAuth),
+lists **Data Space → object category (DMO / DLO / Calculated Insights / All) → objects**, and
+reuses the SAME shared modeling UI (`DataModelBuilder`) + publish/lock pipeline. A
+**Live/Extract** selector chooses the shape. No Salesforce/Excel/BigQuery logic is touched
+(all additive).
+
+**HTTP (`src/datacloud/client.ts`, pure `fetch`)** — `connect` = `Salesforce.login` +
+`exchangeCdpToken` (`POST {instanceUrl}/services/a360/token`,
+`grant_type=urn:salesforce:grant-type:external:cdp`). The CDP token is **dataspace-scoped**
+(`dataspace=` on the token form); the façade re-exchanges when the user picks a non-default
+space. Subsequent CDP calls send a `dataspace` header. `listDataSpaces` (`GET {cdpHost}/api/v1/dataSpaces`,
+fallback Connect REST `/ssot/data-spaces` then `/ssot/dataspaces`). `listObjects`/`describeObject`
+(metadata API with `entityType`/`entityName`; scalar `fields` plus Calculated Insight
+`dimensions`/`measures`; category from suffixes + entity type). `queryRows` (`POST /api/v2/query`
+with `{ sql }` only, then v1; next page `GET /api/v2/query/{nextBatchId}`) with Hyper-sidecar
+date/timestamp coercion. `dataCloudToTwbType`/`dataCloudToHyperType` live in this module.
+Tenant/pod for `dbname` come from the token JSON/JWT/host, else md5 of the instance URL /
+default pod `prod`. Only this module talks to Data Cloud; never to Tableau.
+
+**TDS generation (`src/tableau/authoring/dataCloudTdsGenerator.ts`)** —
+`generateDataCloudTds` (single), `generateDataCloudRelationshipsTds`,
+`generateDataCloudPhysicalJoinTds`, each taking `materialization: 'live' | 'extract'`. Emits a
+`class='salesforce-genie'` OAuth named-connection (`dbname='a360/{pod}/{tenantId};{dataSpace}'`,
+`warehouse`=data space, `server`=`*.c360a.salesforce.com`, `instanceurl`=org URL,
+`username`=Salesforce user) and `[public].[apiName]` relations (relation `name` = friendly
+caption), reconciled 1:1 with `reference/DataCloud{Live,Extract}DS.tds`. Column rule: REAL
+field API names as `remote-name`; globally unique `local-name` (collisions become
+`ssot__Id__c (Account Contact)`). Object-id = `{caption}_{MD5(apiName)}` (spaces kept).
+**Live** omits `<extract>` and `ObjectModelExtractV2` and maps only `context=''`; **Extract**
+adds `class='hyper'` over `Extract."<objectId>"` + `ObjectModelExtractV2` +
+`VConnDownstreamExtractsWithWarnings` + `context='extract'`. Do **not** reuse
+`generateSalesforceTds`.
+
+**Façade (`src/tableau/index.ts`)** — `dataCloudConnect`, `dataCloudListDataSpaces`,
+`dataCloudListObjects`, `dataCloudDescribeObject`, and
+`buildAndPublishDataCloudDatasource(session, input)`: describe each object → (extract only)
+query rows → generate the `.tds` (single/relationships/join × live/extract) → publish a
+`.tdsx` (extract, via `buildExtractTdsx`) or a bare `.tds` (live) with an embedded Data Cloud
+OAuth credential → best-effort embed on the connection(s) → **extract-only**
+`refreshDatasourceNow` → lock + `dataCloudTablesToMetadata`. `dataCloudAuthForSpace` re-exchanges
+the CDP token when the selected data space is not the one the current token was issued for.
+Transient state lives on `session.connectors.datacloud` (creds + sfSession + cdp) and is
+cleared after publish.
+
+## 5f. Snowflake connector — live OR extract datasource builder
+
+A fifth "Build datasource" entry point that signs in with **Server URL + Warehouse +
+Username + Password** (Snowflake session REST, not OAuth), lists **Warehouse → Database →
+Schema → tables**, and reuses the SAME shared modeling UI (`DataModelBuilder`) +
+publish/lock pipeline. A **Live/Extract** selector chooses the shape. No Salesforce/Excel/
+BigQuery/Data Cloud logic is touched (all additive).
+
+**HTTP (`src/snowflake/client.ts`, pure `fetch`)** — `connect` = `POST /session/v1/login-request`
+(username/password + warehouse query param, `requestId`, `CLIENT_ENVIRONMENT.APPLICATION`,
+`Accept: application/snowflake`). `listWarehouses` / `listDatabases` / `listSchemas` /
+`listTables` via `SHOW …` on `/queries/v1/query-request` (name column, even when `created_on`
+is first). `describeTable` via `DESCRIBE TABLE`. `queryRows` (`SELECT … LIMIT`) is **positional**
+(a null cell must not copy another column) with Hyper-sidecar date/timestamp coercion; follows
+`getResultUrl` / code `333334` when the session API returns results asynchronously.
+`snowflakeToTwbType`/`snowflakeToHyperType` live in this module. Nested types (VARIANT /
+OBJECT / ARRAY) are skipped. Only this module talks to Snowflake; never to Tableau. No new
+env vars. The UI matches the login warehouse to `SHOW WAREHOUSES` **case-insensitively**.
+
+**TDS generation (`src/tableau/authoring/snowflakeTdsGenerator.ts`)** —
+`generateSnowflakeTds` (single), `generateSnowflakeRelationshipsTds`,
+`generateSnowflakePhysicalJoinTds`, each taking `materialization: 'live' | 'extract'`. Emits a
+`class='snowflake'` Username Password named-connection (`server` = account host, `dbname` =
+database, `schema`, `warehouse`, `username`, `service=''`, no password in XML) and
+`[DATABASE].[SCHEMA].[TABLE]` relations, reconciled 1:1 with
+`reference/Snowflake{Live,Extract}DS.tds` for connection class, relation shape, extract
+first-table `object-id`, and empty hyper `username`. Column rule: REAL names as `remote-name`;
+collisions become `Region (PEOPLE)`. Object-id =
+`{TABLE} ({DATABASE}.{TABLE})_{MD5(db.schema.table)}` — internally consistent with the Hyper
+table name. Desktop's trailing hash is a different proprietary value (not that MD5); we do
+not copy it.
+**Live** omits `<extract>` and `ObjectModelExtractV2` and maps only `context=''`; **Extract**
+adds `class='hyper'` over `Extract."<objectId>"` with **`<extract object-id>` = first table**
+and empty hyper `username`, plus `ObjectModelExtractV2` + `VConnDownstreamExtractsWithWarnings`
++ `context='extract'`. Do **not** reuse `generateSalesforceTds`.
+
+**Façade (`src/tableau/index.ts`)** — `snowflakeConnect`, `snowflakeListWarehouses` /
+`Databases` / `Schemas` / `Tables`, `snowflakeDescribeTable`, and
+`buildAndPublishSnowflakeDatasource(session, input)`: describe each table → (extract only)
+query rows → generate the `.tds` → publish a `.tdsx` (extract, via `buildExtractTdsx`) or a
+bare `.tds` (live) with **embedded username/password** (`oAuth` unset) → **extract-only**
+`refreshDatasourceNow` → lock + `snowflakeTablesToMetadata`. Does **not** call
+`embedDatasourceConnectionCredential`. Transient state lives on `session.connectors.snowflake`
+(creds + auth) and is cleared after publish.
+
 ## 6. Validation & guards (`src/validation/*`)
 
 - `fieldValidation.ts`: `validatePlanFields(plan, metadata)` extracts fields from
@@ -341,7 +450,7 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | POST | `/api/dashboard/approve` | approve by hash |
 | POST | `/api/dashboard/execute` | publish + verify |
 | GET | `/api/embed/info` | embed URL + optional JWT |
-| GET | `/api/connectors` | list source connectors (Salesforce, Excel, Google BigQuery) |
+| GET | `/api/connectors` | list source connectors (Salesforce, Excel, Google BigQuery, Salesforce Data Cloud, Snowflake) |
 | POST | `/api/connectors/salesforce/connect` | username/password login → list objects |
 | POST | `/api/connectors/salesforce/oauth/start` | begin browser OAuth (PKCE) |
 | GET | `/api/connectors/salesforce/oauth/callback` | OAuth redirect handler |
@@ -360,6 +469,18 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | GET | `/api/connectors/bigquery/tables?projectId=&datasetId=` | list tables in a dataset |
 | POST | `/api/connectors/bigquery/describe` | describe a table's columns |
 | POST | `/api/connectors/bigquery/publish` | build + publish a **live or extract** BigQuery datasource |
+| POST | `/api/connectors/datacloud/connect` | Salesforce SOAP login + CDP token exchange |
+| GET | `/api/connectors/datacloud/dataspaces` | list Data Cloud data spaces |
+| GET | `/api/connectors/datacloud/objects?dataSpace=&category=` | list objects in a data space (DMO/DLO/CI/all) |
+| POST | `/api/connectors/datacloud/describe` | describe an object's scalar columns |
+| POST | `/api/connectors/datacloud/publish` | build + publish a **live or extract** Data Cloud datasource |
+| POST | `/api/connectors/snowflake/connect` | Snowflake username/password session login |
+| GET | `/api/connectors/snowflake/warehouses` | list warehouses |
+| GET | `/api/connectors/snowflake/databases?warehouse=` | list databases |
+| GET | `/api/connectors/snowflake/schemas?warehouse=&database=` | list schemas |
+| GET | `/api/connectors/snowflake/tables?warehouse=&database=&schema=` | list tables |
+| POST | `/api/connectors/snowflake/describe` | describe a table's scalar columns |
+| POST | `/api/connectors/snowflake/publish` | build + publish a **live or extract** Snowflake datasource |
 
 Client returns a sanitized error envelope `{ error: { code, message, hint?, details? } }`.
 
@@ -368,11 +489,11 @@ Client returns a sanitized error envelope `{ error: { code, message, hint?, deta
 `api.ts` stores only the session id (localStorage) and injects `x-session-id`; `App.tsx`
 renders the 4-step flow from the context snapshot; panels map 1:1 to the flow stages.
 `AuthoringPanel` loads Embedding API v3 and renders `<tableau-authoring-viz>` with the
-optional JWT. `SetupPanel` hosts the **Salesforce data-source builder** (`SalesforceBuild`)
-— a 3-step wizard (Connect → Model → Publish) with a Relationship|Join segmented control,
-a "combine multiple objects" toggle, and per-table relationship/join cards; it calls
-`api.salesforcePublish({ tables, relationships, mode, ... })`. Styles for it live in
-`app/styles.css` (`.sf*`, `.segmented`, `.switch`, `.tablecard`, `.joinrow`).
+optional JWT. `SetupPanel` hosts the **Build datasource** connector switch (`SalesforceBuild`,
+`ExcelBuild`, `BigQueryBuild`, `DataCloudBuild`, `SnowflakeBuild`). `SnowflakeBuild` is a
+4-step wizard (Connect → Warehouse/Database/Schema → Model → Publish) with a Live/Extract
+radio; it calls `api.snowflakePublish({ tables, relationships, mode, materialization, ... })`. Styles for
+the builders live in `app/styles.css` (`.sf*`, `.segmented`, `.switch`, `.tablecard`, `.joinrow`).
 
 **Theme & UX (light "Tableau" look).** `app/styles.css` is a light theme driven entirely by
 `:root` CSS variables (`--bg/--panel/--panel-2/--border/--text/--muted` neutrals + Tableau

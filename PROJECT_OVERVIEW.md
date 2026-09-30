@@ -2,7 +2,7 @@
 
 > A plain-language onboarding guide that ties together the README and the `docs/*`
 > set. For binding invariants and deep detail, always defer to the authoritative docs
-> linked at the bottom.
+> linked at the bottom. Last updated: 2026-09-30.
 
 ## What this project is
 
@@ -13,8 +13,8 @@ Tableau Cloud over REST**, opens the **real** Web Authoring embed for hands-on
 refinement, and **verifies** the published result — returning the actual Tableau URL.
 
 It also includes a **"Build datasource"** feature: connect to a source (**Salesforce**,
-**Excel**, or **Google BigQuery** today), model it (relationships or joins), and publish a
-Tableau datasource (extract-backed, or — for BigQuery — a **live** connection).
+**Excel**, **Google BigQuery**, **Salesforce Data Cloud**, or **Snowflake** today), model it (relationships or joins), and publish a
+Tableau datasource (extract-backed, or — for BigQuery, Data Cloud, and Snowflake — a **live** connection).
 
 Two design commitments run through everything:
 
@@ -84,6 +84,16 @@ Browser SPA (React/Vite)                 Node server (Hono BFF)                E
   publisher's saved Google BigQuery OAuth credential. The OAuth **client** id/secret is entered
   in the UI and can be saved encrypted in the user's vault (env `GOOGLE_OAUTH_*` is an optional
   fallback); the email is read from `userinfo`, never asked.
+- **Salesforce Data Cloud** — sign in with the **same username/password form** as Salesforce,
+  pick a Data Space and object type (DMO / DLO / Calculated Insights / All), and each **object**
+  becomes an entity for the same Relationship/Join modeling. Choose **Live** (Tableau queries
+  Data Cloud directly over OAuth) or **Extract** (rows queried into a local `.hyper`, refreshed
+  on Cloud). Both embed the publisher's saved Salesforce Data Cloud OAuth credential.
+- **Snowflake** — sign in with **username/password** (server URL / warehouse / username /
+  password), pick Warehouse → Database → Schema, and each **table** becomes an entity for
+  the same Relationship/Join modeling. Choose **Live** (Tableau queries Snowflake directly)
+  or **Extract** (rows queried into a local `.hyper`, refreshed on Cloud). Both embed the
+  Snowflake username/password on the Tableau Cloud connection (not OAuth).
 
 All reuse the same shared machinery: the `DataModelBuilder` UI, the TDS-generation
 helpers, the Hyper sidecar (extract shapes), and the publish pipeline.
@@ -184,18 +194,26 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
 1. **Connect / upload / sign in** — Salesforce: `POST /api/connectors/salesforce/connect`
    logs in and lists objects; Excel: `POST /api/connectors/excel/upload` parses the workbook
    (`src/excel/excelClient.ts`) into sheets; BigQuery: browser Google OAuth
-   (`/api/connectors/bigquery/oauth/*`, `src/bigquery/*`) then list projects/datasets/tables.
-   State is transient on the session.
+   (`/api/connectors/bigquery/oauth/*`, `src/bigquery/*`) then list projects/datasets/tables;
+   Data Cloud: SOAP login + CDP token (`/api/connectors/datacloud/*`, `src/datacloud/*`) then
+   list data spaces/objects; Snowflake: session login (`/api/connectors/snowflake/*`,
+   `src/snowflake/*`) then list warehouses/databases/schemas/tables. State is transient on
+   the session.
 2. **Model** — the shared `DataModelBuilder.tsx` lets you add tables/sheets and define
    relationships or physical joins; join fields come from `describe` calls.
 3. **Publish** — `POST /api/connectors/<name>/publish` calls the orchestrator in
    `src/tableau/index.ts`: it generates the `.tds` (`authoring/tdsGenerator.ts` /
-   `excelTdsGenerator.ts` / `bigqueryTdsGenerator.ts`) and, for extracts, materializes a
+   `excelTdsGenerator.ts` / `bigqueryTdsGenerator.ts` / `dataCloudTdsGenerator.ts` /
+   `snowflakeTdsGenerator.ts`) and, for extracts, materializes a
    `.hyper` via the Python sidecar (`publishing/hyperPackager.ts`), then publishes the
-   `.tdsx` (or a bare `.tds` for a BigQuery **Live** datasource) via `publishing/datasource.ts`.
+   `.tdsx` (or a bare `.tds` for a BigQuery/Data Cloud/Snowflake **Live** datasource) via `publishing/datasource.ts`.
 4. **Credential + refresh** — **Salesforce**: the saved Salesforce OAuth credential is
    embedded and an extract refresh is triggered. **BigQuery**: the saved Google BigQuery OAuth
    credential is embedded (Live and Extract); Extract also triggers a refresh, Live does not.
+   **Data Cloud**: the saved Salesforce Data Cloud OAuth credential is embedded (Live and Extract);
+   Extract also triggers a refresh, Live does not.
+   **Snowflake**: username/password is embedded on the published connection (Live and Extract);
+   Extract also triggers a refresh, Live does not.
    **Excel** is extract-only (bundled `.hyper` is the data; no credential, no refresh).
 5. **Lock + continue** — the freshly published datasource is locked, and the normal
    dashboard flow above proceeds unchanged.
@@ -209,7 +227,9 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
   gateway or OpenRouter.
 - **Tableau:** REST + Metadata APIs; server-side `.twb`/`.tds` XML generation.
 - **Extracts:** Tableau Hyper API via a Python sidecar (`.venv-hyper`), plus `exceljs` for
-  Excel parsing and pure-`fetch` BigQuery/Cloud Resource Manager REST for BigQuery.
+  Excel parsing, pure-`fetch` BigQuery/Cloud Resource Manager REST for BigQuery,
+  pure-`fetch` Data Cloud HTTP for Salesforce Data Cloud, and pure-`fetch` Snowflake
+  session REST for Snowflake.
 - **Validation:** Zod schemas for all AI output and API boundaries.
 - **Testing:** Vitest (unit/integration), Playwright (e2e).
 
@@ -221,6 +241,8 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
   - `components/DataModelBuilder.tsx` — shared relationship/join modeling UI.
   - `components/ExcelBuild.tsx` — the Excel connector sub-flow.
   - `components/BigQueryBuild.tsx` — the Google BigQuery connector sub-flow (OAuth, Live/Extract).
+  - `components/DataCloudBuild.tsx` — the Salesforce Data Cloud connector sub-flow (SOAP login, Live/Extract).
+  - `components/SnowflakeBuild.tsx` — the Snowflake connector sub-flow (username/password, Warehouse → Database → Schema, Live/Extract).
 - `src/server/` — Hono app (`app.ts` routes, `index.ts` bootstrap).
 - `src/agents/` — Mastra agents (`tableauPilotAgent`, `dashboardPlannerAgent`,
   `calculationEngineerAgent`, plus knowledge).
@@ -231,7 +253,7 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
   - `index.ts` — the `TableauService` orchestrator (connect, lock, publish, connector
     builds).
   - `authoring/` — `.twb`/`.tds` generation (`tdsGenerator.ts` shared helpers,
-    `excelTdsGenerator.ts`, `bigqueryTdsGenerator.ts`, worksheet/chart/filter/calc builders,
+    `excelTdsGenerator.ts`, `bigqueryTdsGenerator.ts`, `dataCloudTdsGenerator.ts`, `snowflakeTdsGenerator.ts`, worksheet/chart/filter/calc builders,
     `twbxPackager.ts`).
   - `publishing/` — `datasource.ts` (publish, embed credential, refresh), `hyperPackager.ts`
     (sidecar).
@@ -239,6 +261,8 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
 - `src/salesforce/` — Salesforce client + OAuth (`client.ts`, `oauth.ts`, `oauthStore.ts`).
 - `src/excel/` — `excelClient.ts` (workbook parsing).
 - `src/bigquery/` — BigQuery client + Google OAuth (`client.ts`, `oauth.ts`, `oauthStore.ts`).
+- `src/datacloud/` — Data Cloud client (`client.ts`; imports Salesforce SOAP `login`).
+- `src/snowflake/` — Snowflake client (`client.ts`; session login + SHOW/DESCRIBE/SELECT).
 - `src/vault/` — PIN-encrypted credential vault, sessions, crypto.
 - `src/schemas/` — Zod schemas (`common.ts` holds connector build/relationship schemas).
 - `src/config/`, `src/llm/`, `src/memory/`, `src/observability/`, `src/utils/` — infra.
@@ -253,7 +277,7 @@ a server-only `VAULT_PEPPER` + per-user salt) that encrypts credentials at rest.
 unlock, decrypted secrets live only in an in-memory session keyed by an opaque
 `sessionId`; the browser holds only that id. Logs, traces, LLM inputs, and tool outputs
 are redacted/sanitized so tokens never leak. Connector source credentials/tokens
-(Salesforce creds, the Google BigQuery OAuth token) are transient and cleared after publish;
+(Salesforce creds, the Google BigQuery OAuth token, Data Cloud SOAP/CDP tokens, Snowflake session token + password) are transient and cleared after publish;
 published datasources rely on Tableau Cloud's saved credentials, not secrets this app stores.
 (The BigQuery OAuth *client* id/secret — an app-registration credential, not a user token — may
 optionally be saved encrypted in the user's vault so it need not be re-entered.) Full detail:
@@ -278,7 +302,8 @@ Open http://localhost:5173. Production: `npm run build` then `npm start`. Tests:
   (`docs/authoring-limitations.md`).
 - **Generated `.twb` is best-effort** and may need field re-binding/visual tuning.
 - **File connectors are extract-only** (a local file path can't live-connect on Cloud).
-  BigQuery supports both **Live** and **Extract** (it's a real cloud warehouse, not a file).
+  BigQuery, Data Cloud, and Snowflake support both **Live** and **Extract** (they are
+  cloud warehouses / platforms, not files).
 - **Server-side `createExtract` is unsupported on the target Cloud site**, so extracts are
   built locally via the Hyper sidecar.
 

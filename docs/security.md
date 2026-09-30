@@ -1,11 +1,13 @@
 # Security
 
+> Living document. Last updated: 2026-09-30.
+
 ## Threat model & goals
 
 1. Secrets (Tableau PAT secret, Connected App secret, REST token; connector source
-   credentials/tokens such as Salesforce creds and the Google BigQuery OAuth token; and any
-   saved OAuth client secret) must **never** reach the browser, the LLM, logs, traces, Mastra
-   memory, or workflow state.
+   credentials/tokens such as Salesforce creds, the Google BigQuery OAuth token, and the
+   Data Cloud SOAP/CDP tokens; the Snowflake session token + password; and any saved OAuth client secret) must **never** reach the
+   browser, the LLM, logs, traces, Mastra memory, or workflow state.
 2. Credentials at rest must be unreadable without the user's PIN.
 3. A 6-digit PIN is low entropy, so brute force must be economically infeasible and
    rate-limited.
@@ -107,6 +109,37 @@
   secret this app holds. **No Google credential is ever baked into the `.tds`/`.hyper`.**
 - **Same sidecar hygiene.** Extract mode reuses `hyperPackager.ts` (temp-file paths on argv only,
   temp dir always removed); **Live** mode publishes a bare `.tds` and touches no `.hyper`.
+
+## Salesforce Data Cloud connector
+
+- **Tokens are transient only.** The Salesforce SOAP session and the Data Cloud CDP token
+  are held **in-memory** on `session.connectors.datacloud`, used only to list data spaces/
+  objects, describe columns, and (for an extract) query rows, and are **cleared once
+  publishing completes**. They are never persisted to the vault, never sent to the browser
+  or the LLM, and never logged (`src/datacloud/*` redacts).
+- **Password login, not a new OAuth client.** The UI copies the Salesforce username/password
+  form; `src/datacloud/client.ts` imports unmodified `Salesforce.login` then exchanges a CDP
+  token (`POST /services/a360/token`). No new env vars.
+- **Saved-credential match, not the SOAP password.** Both live and extract datasources embed
+  the publisher's **saved Salesforce Data Cloud OAuth credential** on Tableau Cloud (matched
+  by username). **No Data Cloud credential is ever baked into the `.tds`/`.hyper`.**
+- **Same sidecar hygiene.** Extract mode reuses `hyperPackager.ts` (temp-file paths on argv
+  only, temp dir always removed); **Live** mode publishes a bare `.tds` and touches no `.hyper`.
+
+## Snowflake connector
+
+- **Tokens are transient only.** The Snowflake session token and password are held
+  **in-memory** on `session.connectors.snowflake`, used only to list warehouses/databases/
+  schemas/tables, describe columns, and (for an extract) query rows, and are **cleared once
+  publishing completes**. They are never persisted to the vault, never sent to the browser
+  or the LLM, and never logged (`src/snowflake/*` redacts).
+- **Username/password, not OAuth.** The UI collects server URL / warehouse / username /
+  password; `src/snowflake/client.ts` uses session REST login. No new env vars.
+- **Password is embedded at publish.** Both live and extract datasources send Tableau REST
+  `connectionCredentials` with name + password (`embed=true`, not `oAuth`). **No Snowflake
+  password is written into the `.tds`/`.hyper` XML.**
+- **Same sidecar hygiene.** Extract mode reuses `hyperPackager.ts`; **Live** mode publishes
+  a bare `.tds` and touches no `.hyper`.
 
 ## Operational guidance
 

@@ -1,5 +1,7 @@
 # Authoring Limitations (Category C) — read this
 
+> Living document. Last updated: 2026-09-30.
+
 TableauPilot is built to be **truthful about capability boundaries**. This document
 states exactly what the automated pipeline does and does not guarantee.
 
@@ -95,6 +97,52 @@ Honest boundaries:
 - **GCP prerequisites.** Requires the user's own Google OAuth client, with the **BigQuery** and
   **Cloud Resource Manager** APIs enabled and the callback registered as an Authorized redirect URI
   (the connector's in-UI how-to walks through this).
+
+## Salesforce Data Cloud datasources — honest scope
+
+The Data Cloud connector publishes either a **Live** datasource (Tableau queries Data Cloud
+directly over OAuth) or an **Extract** datasource (rows materialized into a bundled `.hyper`
+and refreshed on Tableau Cloud), from the selected objects with relationships or physical joins.
+Honest boundaries:
+
+- **Refreshability depends on a Tableau-Cloud saved credential.** Both shapes embed the
+  publisher's **saved Salesforce Data Cloud OAuth credential** (matched by username). If that
+  saved credential is missing/expired on Tableau Cloud, a Live datasource won't query and an
+  Extract refresh won't run — the app's own SOAP/CDP tokens are transient and are not what
+  Tableau refreshes with.
+- **Extract row caps.** Extract mode caps each object at `HYPER_MAX_ROWS`; large objects are
+  truncated, not fully mirrored. Live mode has no cap (Tableau queries the source).
+- **Post-publish extract refresh is best-effort.** After an Extract publish the app triggers a
+  server-side "Update Data Source Now"; the bundled `.hyper` already holds data queried at publish
+  time even if the refresh can't start.
+- **Unsupported column types are skipped.** Nested/complex/CI-only field shapes are not modeled
+  (scalar columns only). Real field API names are preserved as the connection `remote-name` with
+  disambiguated local names.
+- **Data Cloud must be enabled.** CDP token exchange and metadata URLs vary slightly by org;
+  if Data Cloud is not provisioned for the user, the connector surfaces a `CONNECTOR_API` error.
+
+## Snowflake datasources — honest scope
+
+The Snowflake connector publishes either a **Live** datasource (Tableau queries Snowflake
+directly with Username Password) or an **Extract** datasource (rows materialized into a
+bundled `.hyper` and refreshed on Tableau Cloud), from the selected tables with
+relationships or physical joins. Honest boundaries:
+
+- **Embedded password, not OAuth.** Both shapes embed username/password at publish. If
+  Tableau Cloud rejects the credential (SSO/MFA/network policy), Live queries and Extract
+  refresh fail — the app's session token is transient and is not what Tableau refreshes with.
+- **Extract row caps.** Extract mode caps each table at `HYPER_MAX_ROWS`; large tables are
+  truncated, not fully mirrored. Live mode has no cap (Tableau queries the source).
+- **Post-publish extract refresh is best-effort.** After an Extract publish the app triggers a
+  server-side "Update Data Source Now"; the bundled `.hyper` already holds data queried at publish
+  time even if the refresh can't start.
+- **Unsupported column types are skipped.** Nested VARIANT/OBJECT/ARRAY columns are not modeled
+  (scalar columns only). Real names are preserved as the connection `remote-name` with
+  disambiguated local names.
+- **Role is the session default.** There is no Role field in the UI; the TDS `service`
+  attribute is empty (matching the Desktop reference).
+- **Tables only.** The picker lists `SHOW TABLES` (not views). Warehouse names from login
+  are matched case-insensitively to `SHOW WAREHOUSES`.
 
 ## The honest hand-off
 

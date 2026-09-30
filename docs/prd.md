@@ -1,7 +1,7 @@
 # PRD — TableauPilot AI
 
 > Living document. Update this whenever product scope, requirements, or success
-> criteria change. Last updated: 2026-09-29.
+> criteria change. Last updated: 2026-09-30.
 
 ## 1. Summary
 
@@ -92,6 +92,27 @@ after publish). Both embed the signed-in account's saved BigQuery OAuth credenti
 `Build datasource > select connector > Google BigQuery > Sign in with Google > pick billing
 project/project/dataset > select table(s) > Relationship or Join > Live or Extract > publish`.
 
+**Alternate flow — Salesforce Data Cloud data source builder.** Pick the **Salesforce Data Cloud**
+connector and sign in with the **same username/password form** as Salesforce (org URL, username,
+password, optional security token). Choose a **Data Space** and an **object type** (Data Model
+Objects, Data Lake Objects, Calculated Insights, or All); the space's **objects** appear as the
+"objects" for the SAME modeling step (relationships or joins). Choose **Live** (Tableau queries
+Data Cloud directly over OAuth) or **Extract** (rows are materialized into a bundled `.hyper` and
+refreshed on Tableau Cloud after publish). Both embed the publisher's saved Salesforce Data Cloud
+OAuth credential. Flow:
+`Build datasource > select connector > Salesforce Data Cloud > connect > pick data space and
+object type > select object(s) > Relationship or Join > Live or Extract > publish`.
+
+**Alternate flow — Snowflake data source builder.** Pick the **Snowflake** connector and sign
+in with **username/password** (account host / warehouse / username / password — no Role
+field). Choose **Warehouse → Database → Schema**; the schema's **tables** appear as the
+"objects" for the SAME modeling step (relationships or joins). Choose **Live** (Tableau
+queries Snowflake directly with Username Password) or **Extract** (rows are materialized into
+a bundled `.hyper` and refreshed on Tableau Cloud after publish). Both embed the Snowflake
+username/password on the published connection (not OAuth). Flow:
+`Build datasource > select connector > Snowflake > connect > pick warehouse/database/schema >
+select table(s) > Relationship or Join > Live or Extract > publish`.
+
 ## 6. Functional requirements
 
 - **FR1 Vault.** Register/unlock with username + 6-digit PIN; AES-256-GCM at rest;
@@ -139,6 +160,24 @@ project/project/dataset > select table(s) > Relationship or Join > Live or Extra
   server-side refresh. Both embed the signed-in account's saved BigQuery OAuth credential
   (matched by email). BigQuery column names (which may contain spaces/hyphens) are kept as the
   connection `remote-name` with disambiguated local names. No Salesforce/Excel logic is altered.
+- **FR16 Salesforce Data Cloud connector.** Sign in with **Salesforce username/password** (SOAP
+  login, then CDP token exchange); list data spaces and objects by category (DMO / DLO /
+  Calculated Insights / All); model one or more objects as **relationships** or a **physical
+  join**; choose **Live** or **Extract**. Live publishes a bare `class='salesforce-genie'` OAuth
+  `.tds` (Tableau queries Data Cloud directly); Extract queries rows, materializes a local
+  `.hyper` (Python sidecar) + `.tdsx`, publishes it, and triggers a server-side refresh. Both
+  embed the publisher's saved Salesforce Data Cloud OAuth credential (matched by username). Field
+  API names are kept as the connection `remote-name` with disambiguated local names. Nested
+  fields are skipped. No Salesforce CRM / Excel / BigQuery logic is altered.
+- **FR17 Snowflake connector.** Sign in with **Snowflake username/password** (server URL +
+  warehouse); list warehouses, databases, schemas, and tables; model one or more tables as
+  **relationships** or a **physical join**; choose **Live** or **Extract**. Live publishes a
+  bare `class='snowflake'` Username Password `.tds` (Tableau queries Snowflake directly);
+  Extract queries rows, materializes a local `.hyper` (Python sidecar) + `.tdsx`, publishes
+  it, and triggers a server-side refresh. Both embed the Snowflake username/password on the
+  published connection. Column names (which may contain spaces) are kept as the connection
+  `remote-name` with disambiguated local names. Nested/VARIANT columns are skipped. No
+  Salesforce / Excel / BigQuery / Data Cloud logic is altered.
 
 ## 7. Non-functional requirements
 
@@ -147,7 +186,7 @@ project/project/dataset > select table(s) > Relationship or Join > Live or Extra
 - **Reliability.** Structured-output planning works across Anthropic-compatible gateways
   (JSON prompt injection + fallback parsing).
 - **Portability.** TypeScript/Node ≥ 20.9; the only Python is the optional Hyper extract
-  sidecar (Salesforce connector); minimal dependencies.
+  sidecar (Salesforce, Excel, BigQuery/Data Cloud/Snowflake extract); minimal dependencies.
 - **Observability.** Redacting logger + spans/events; Mastra Studio parity.
 - **Testability.** Unit + integration (Vitest) and non-destructive E2E (Playwright);
   `tsc`/lint/build must stay clean.

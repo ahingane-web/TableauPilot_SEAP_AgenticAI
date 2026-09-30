@@ -13,6 +13,7 @@ import type { DatasourceLock, TableauProjectContext } from '../schemas/common.js
 import type { DashboardPlan } from '../schemas/dashboardPlan.js';
 import type { SalesforceCredentials, SalesforceSession, SalesforceTable } from '../salesforce/client.js';
 import type { ExcelSheet } from '../excel/excelClient.js';
+import type { SnowflakeAuth, SnowflakeCredentials } from '../snowflake/client.js';
 import { sweepPendingOauth } from '../salesforce/oauthStore.js';
 import { sweepPendingBigQueryOauth } from '../bigquery/oauthStore.js';
 import type { DatasourceMetadata } from '../tableau/types.js';
@@ -67,6 +68,35 @@ export interface ConnectorState {
     clientId: string;
     /** OAuth client secret, if the flow used a confidential client (needed to refresh). Secret. */
     clientSecret?: string;
+  };
+  /**
+   * Transient Salesforce Data Cloud (Genie) state. Core SOAP session + CDP token are
+   * memory-only, used to list data spaces/objects and (for extracts) query rows, then
+   * cleared after publish. Never persisted, logged, or sent to the client.
+   */
+  datacloud?: {
+    creds: SalesforceCredentials;
+    sfSession: SalesforceSession;
+    cdp: {
+      accessToken: string;
+      instanceUrl: string;
+      coreInstanceUrl: string;
+      coreAccessToken: string;
+      apiVersion: string;
+      tenantId: string;
+      pod: string;
+      /** Data space the CDP token was issued for (`dataspace=` on the a360 exchange). */
+      dataSpace?: string;
+    };
+  };
+  /**
+   * Transient Snowflake state. Session token + password are memory-only, used to list
+   * warehouses/databases/schemas/tables and (for extracts) query rows, then cleared after
+   * publish. Never persisted, logged, or sent to the client.
+   */
+  snowflake?: {
+    creds: SnowflakeCredentials;
+    auth: SnowflakeAuth;
   };
 }
 

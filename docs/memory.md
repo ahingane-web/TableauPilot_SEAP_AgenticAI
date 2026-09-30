@@ -1,7 +1,94 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-09-29.
+> Newest entries at the top of the change log. Last updated: 2026-09-30.
+
+## Feature: Snowflake connector (Build datasource) (newest first)
+
+- **2026-09-30 — Docs sweep: Snowflake (and the fifth-connector set) covered across the
+  full Markdown set.** Propagated verification-pass facts (positional `queryRows`, SHOW
+  `name` vs `created_on`, `requestId`/`CLIENT_ENVIRONMENT`/`Accept: application/snowflake`,
+  case-insensitive warehouse preselect, Desktop object-id hash ≠ `MD5(db.schema.table)`)
+  into `design.md` §5f, `architecture.md` §3f + excel/bigquery layers, `rules.md`,
+  `prd.md` (Snowflake alternate flow + FR17), `authentication.md` §8,
+  `authoring-limitations.md`, `tableau-api-capabilities.md`, `README.md` (all five
+  connectors + `HYPER_MAX_ROWS`), `PROJECT_OVERVIEW.md`, and `.env.example` Hyper
+  comments. Suite still **284 tests**. Text/docs-only besides the earlier client fixes.
+
+- **2026-09-30 — Verification pass vs `reference/Snowflake{Live,Extract}DS.tds`.** Connection
+  class, Username Password attrs (`service=''`, 3-part relations, extract first-table
+  `object-id`, hyper `username=''`, family=`ORDERS`) match. Desktop's trailing object-id
+  hash is **not** `MD5(database.schema.table)` (ORDERS reference is `DC63…`; our stable
+  id uses the plan formula `MD5(db.schema.table)` so TDS object-id and Hyper table names
+  stay in lock-step). Client fixes: extract `queryRows` is positional (a null middle
+  column no longer copies another cell); SHOW name is read even when `created_on` is
+  first; login sends `requestId` + `CLIENT_ENVIRONMENT` and `Accept: application/snowflake`
+  like the official connector; async `getResultUrl` is followed; warehouse picker matches
+  the login warehouse case-insensitively. Tests: snowflakeClient 12, snowflakeTds 14;
+  suite **284** (282 in-sandbox; 2 real-Hyper unsandboxed).
+
+- **2026-09-30 — Added Snowflake as a fifth "Build datasource" connector (password login,
+  Live + Extract).** Flow: `Build datasource > pick connector > Snowflake > session login
+  (server URL / warehouse / username / password) > pick Warehouse → Database → Schema >
+  model tables > Live or Extract > publish`. Strictly additive: Salesforce, Excel, BigQuery,
+  and Data Cloud connector internals are unchanged.
+  - **HTTP:** [`src/snowflake/client.ts`](../src/snowflake/client.ts) — session REST login
+    (`POST /session/v1/login-request`), SHOW warehouses/databases/schemas/tables, DESCRIBE,
+    SELECT rows with date/timestamp coercion. Type mappers live here. Nested VARIANT/OBJECT/
+    ARRAY columns are skipped. No new env vars.
+  - **TDS:** [`src/tableau/authoring/snowflakeTdsGenerator.ts`](../src/tableau/authoring/snowflakeTdsGenerator.ts)
+    — `class='snowflake'` Username Password (not OAuth), `[DATABASE].[SCHEMA].[TABLE]`
+    relations, object-id `{TABLE} ({DATABASE}.{TABLE})_{MD5}`, real column names as
+    `remote-name`. Reconciled with `reference/Snowflake{Live,Extract}DS.tds`. Live: no
+    `<extract>`; Extract: Hyper `Extract."<objectId>"` with first-table extract `object-id`
+    and empty hyper username + `ObjectModelExtractV2` + `VConnDownstreamExtractsWithWarnings`.
+  - **Façade / routes / UI:** `TableauService.snowflake*` + `listConnectors` entry;
+    `/api/connectors/snowflake/{connect,warehouses,databases,schemas,tables,describe,publish}`;
+    `SnowflakeBuild.tsx`; SetupPanel dropdown branch only. Publish: extract → sidecar
+    `.hyper` + `.tdsx` + password embed + refresh; live → bare `.tds` + password embed, no
+    refresh. Tokens on `session.connectors.snowflake`, cleared after publish.
+  - **Tests:** `tests/unit/snowflakeTdsGenerator.test.ts` (14) + `snowflakeClient.test.ts` (12).
+    Full suite **284 tests** (282 passing in-sandbox; 2 real-Hyper tests need unsandboxed Hyper).
+    Typecheck + lint clean. Isolation: no Salesforce/Excel/BigQuery/Data Cloud internals edited.
+
+## Feature: Salesforce Data Cloud connector (Build datasource) (newest first)
+
+- **2026-09-30 — Verification pass: Data Cloud HTTP now matches Salesforce's real APIs.**
+  CDP tokens are **dataspace-scoped** (`dataspace=` on `POST /services/a360/token`); we re-exchange
+  when the user picks a non-default space. Metadata/Query calls send a `dataspace` header.
+  Query body is `{ sql }` only; pagination is `GET /api/v2/query/{nextBatchId}`. Connect REST
+  fallback for spaces is `/ssot/data-spaces` (hyphenated, with the old path as second try).
+  Calculated Insights read `dimensions`/`measures` (not only `fields`); describe no longer
+  falls back to the first entity when the named object is missing. UI shows an empty-state
+  when a space/category has no objects. Isolation unchanged (Salesforce/Excel/BigQuery
+  internals not edited). Full suite **258 tests** (256 passing in-sandbox; 2 real-Hyper tests
+  need `.venv-hyper` / unsandboxed Hyper). Typecheck + lint clean.
+
+- **2026-09-30 — Added Salesforce Data Cloud as a fourth "Build datasource" connector
+  (password login, Live + Extract).** Flow: `Build datasource > pick connector > Salesforce
+  Data Cloud > SOAP login (org URL / username / password / optional token) > pick Data Space >
+  object category (DMO / DLO / Calculated Insights / All) > model objects > Live or Extract >
+  publish`. Strictly additive: Salesforce, Excel, and BigQuery connector internals are
+  unchanged.
+  - **HTTP:** [`src/datacloud/client.ts`](../src/datacloud/client.ts) — imports unmodified
+    `Salesforce.login`, exchanges a CDP token (`POST /services/a360/token`), lists data spaces
+    (CDP `/api/v1/dataSpaces` with Connect REST `ssot/dataspaces` fallback), lists/describes
+    objects by category, queries rows (`/api/v1|v2/query`) with date/timestamp coercion. Type
+    mappers live here (do not edit Salesforce/BigQuery maps). Nested/complex fields are skipped.
+  - **TDS:** [`src/tableau/authoring/dataCloudTdsGenerator.ts`](../src/tableau/authoring/dataCloudTdsGenerator.ts)
+    — `class='salesforce-genie'` (not CRM `salesforce`), `[public].[apiName]` relations,
+    `dbname=a360/{pod}/{tenantId};{dataSpace}`, object-id `{caption}_{MD5(apiName)}` (spaces
+    kept), real API names as `remote-name`. Reconciled with `reference/DataCloud{Live,Extract}DS.tds`.
+    Live: no `<extract>`; Extract: Hyper `Extract."<objectId>"` + `ObjectModelExtractV2` +
+    `VConnDownstreamExtractsWithWarnings`.
+  - **Façade / routes / UI:** `TableauService.dataCloud*` + `listConnectors` entry;
+    `/api/connectors/datacloud/{connect,dataspaces,objects,describe,publish}`;
+    `DataCloudBuild.tsx` (self-contained login form, not SalesforceBuild); SetupPanel dropdown
+    branch only. Publish: extract → sidecar `.hyper` + `.tdsx` + embed + refresh; live → bare
+    `.tds` + embed, no refresh. Tokens on `session.connectors.datacloud`, cleared after publish.
+  - **Tests:** `tests/unit/dataCloudTdsGenerator.test.ts` (14) + `dataCloudClient.test.ts` (9).
+    Full suite **256 tests** (254 passing in-sandbox; 2 real-Hyper tests need `.venv-hyper`).
+    Typecheck + lint clean. No Salesforce/Excel/BigQuery internals edited.
 
 ## Feature: Google BigQuery connector (Build datasource) (newest first)
 

@@ -1,9 +1,11 @@
 # Python Dependency Decision — scoped to extract building
 
+> Living document. Last updated: 2026-09-30.
+
 **Decision: TableauPilot is TypeScript / Node.js, with ONE narrow exception — a Python
 Hyper API sidecar used solely to materialize `.hyper` extracts for the Build-datasource
-connectors (Salesforce, Excel, and Google BigQuery — the latter only when the user picks
-"Extract"; a BigQuery "Live" datasource needs no sidecar).**
+connectors (Salesforce, Excel, Google BigQuery, Salesforce Data Cloud, and Snowflake —
+the latter three only when the user picks "Extract"; a Live datasource needs no sidecar).**
 
 ## Background
 
@@ -35,10 +37,12 @@ is exactly the trigger this document always named for revisiting the no-Python s
 - Invoked as a subprocess by
   [`src/tableau/publishing/hyperPackager.ts`](../src/tableau/publishing/hyperPackager.ts).
   All connectors reuse this one sidecar: the Excel connector parses the workbook in
-  TypeScript (`exceljs`) and the BigQuery connector queries rows over REST (`jobs.query`),
-  each feeding the same schema + rows into it. All connector access, `.tds`/`.twb` authoring,
-  and publishing stay in TypeScript. (A BigQuery **Live** datasource skips the sidecar entirely
-  — it publishes a bare `.tds` with no `.hyper`.)
+  TypeScript (`exceljs`), the BigQuery connector queries rows over REST (`jobs.query`), and
+  the Data Cloud connector queries rows over the Data Cloud Query API, and the Snowflake
+  connector queries rows over session SQL, each feeding the same
+  schema + rows into it. All connector access, `.tds`/`.twb` authoring, and publishing stay
+  in TypeScript. (A BigQuery, Data Cloud, or Snowflake **Live** datasource skips the sidecar entirely —
+  it publishes a bare `.tds` with no `.hyper`.)
 - Installed into a local virtualenv via `npm run setup:hyper` (`.venv-hyper/`, gitignored).
   The interpreter path is configurable via `HYPER_PYTHON`.
 - No secrets or row data are passed on argv — only temp file paths.
@@ -55,7 +59,13 @@ is exactly the trigger this document always named for revisiting the no-Python s
   extract is the data). The BigQuery connector (Extract mode) materializes the `.hyper` from a
   live `jobs.query`, then embeds the publisher's **saved Google BigQuery OAuth credential** and
   triggers a refresh — like Salesforce; BigQuery **Live** embeds the credential but skips the
-  local `.hyper`/refresh (Tableau queries BigQuery directly).
+  local `.hyper`/refresh (Tableau queries BigQuery directly). The Data Cloud connector (Extract
+  mode) materializes the `.hyper` from the Data Cloud Query API, then embeds the publisher's
+  **saved Salesforce Data Cloud OAuth credential** and triggers a refresh; Data Cloud **Live**
+  embeds the credential but skips the local `.hyper`/refresh (Tableau queries Data Cloud
+  directly). The Snowflake connector (Extract mode) materializes the `.hyper` from session
+  SQL, then embeds username/password and triggers a refresh; Snowflake **Live** embeds the
+  password but skips the local `.hyper`/refresh (Tableau queries Snowflake directly).
 - XML is still generated deterministically in TypeScript, never by the LLM.
 - If a future feature needs richer local extract logic, extend the sidecar rather than
   spreading Python across the codebase.

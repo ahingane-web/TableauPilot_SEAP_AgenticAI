@@ -487,6 +487,218 @@ export const BigQueryBuildSchema = z
   });
 export type BigQueryBuildInput = z.infer<typeof BigQueryBuildSchema>;
 
+// ---------------------------------------------------------------------------------------
+// Salesforce Data Cloud connector (Build-datasource flow). Additive — does not change
+// Salesforce CRM, Excel, or BigQuery schemas. Object/field API names are identifier-safe
+// (`ssot__Account__dlm`); captions (with spaces) are display-only.
+// ---------------------------------------------------------------------------------------
+
+/** Data Cloud object category for the object-type picker. */
+export const DataCloudObjectCategorySchema = z.enum(['dmo', 'dlo', 'ci', 'all']);
+export type DataCloudObjectCategory = z.infer<typeof DataCloudObjectCategorySchema>;
+
+/** Data space API name, e.g. `default`. */
+export const DataCloudDataSpaceSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9_-]{0,127}$/, 'Expected a Data Cloud data space name');
+
+/** Data Cloud object API name, e.g. `ssot__Account__dlm`. */
+export const DataCloudObjectNameSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9_]{0,254}$/, 'Expected a Data Cloud object API name');
+
+/** Data Cloud field API name, e.g. `ssot__Id__c`. */
+export const DataCloudFieldNameSchema = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z][A-Za-z0-9_]{0,254}$/, 'Expected a Data Cloud field API name');
+
+export const DataCloudMaterializationSchema = z.enum(['live', 'extract']);
+export type DataCloudMaterialization = z.infer<typeof DataCloudMaterializationSchema>;
+
+export const DataCloudRelationshipSchema = z.object({
+  leftObject: DataCloudObjectNameSchema,
+  leftField: DataCloudFieldNameSchema,
+  rightObject: DataCloudObjectNameSchema,
+  rightField: DataCloudFieldNameSchema,
+  cardinality: SalesforceCardinalitySchema.default('many-to-many'),
+  joinType: SalesforceJoinTypeSchema.default('left'),
+});
+export type DataCloudRelationship = z.infer<typeof DataCloudRelationshipSchema>;
+
+/**
+ * Payload for building a Data Cloud datasource (live or extract). `tables` are object API
+ * names in the selected data space. Connectivity rules match {@link SalesforceBuildSchema}.
+ */
+export const DataCloudBuildSchema = z
+  .object({
+    credentials: SalesforceCredentialsSchema,
+    dataSpace: DataCloudDataSpaceSchema,
+    category: DataCloudObjectCategorySchema.default('all'),
+    tables: z.array(DataCloudObjectNameSchema).min(1, 'Select at least one Data Cloud object'),
+    relationships: z.array(DataCloudRelationshipSchema).default([]),
+    mode: SalesforceBuildModeSchema.default('relationship'),
+    materialization: DataCloudMaterializationSchema.default('extract'),
+    projectId: z.string().trim().min(1, 'Select a Tableau project/folder to publish into'),
+    datasourceName: z.string().trim().min(1, 'Provide a name for the new datasource'),
+    overwrite: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const tables = val.tables.map((t) => t.trim());
+    const unique = new Set(tables);
+    if (unique.size !== tables.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['tables'], message: 'Duplicate objects are not allowed.' });
+    }
+    if (tables.length === 1) {
+      if (val.relationships.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships'],
+          message: 'A single-object datasource cannot have relationships.',
+        });
+      }
+      return;
+    }
+    for (const [i, r] of val.relationships.entries()) {
+      if (!unique.has(r.leftObject.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'leftObject'],
+          message: `Relationship references "${r.leftObject}", which is not one of the selected objects.`,
+        });
+      }
+      if (!unique.has(r.rightObject.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'rightObject'],
+          message: `Relationship references "${r.rightObject}", which is not one of the selected objects.`,
+        });
+      }
+      if (r.leftObject.trim() === r.rightObject.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i],
+          message: 'A relationship must connect two different objects.',
+        });
+      }
+    }
+    if (val.relationships.length < tables.length - 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: `Need at least ${tables.length - 1} relationship(s) to connect ${tables.length} objects.`,
+      });
+      return;
+    }
+    if (!isConnected(tables, val.relationships)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: 'The relationships must connect every object into a single joined model.',
+      });
+    }
+  });
+export type DataCloudBuildInput = z.infer<typeof DataCloudBuildSchema>;
+
+// ---------------------------------------------------------------------------------------
+// Snowflake connector (Build-datasource flow). Additive — does not change Salesforce,
+// Excel, BigQuery, or Data Cloud schemas. Column names may contain spaces; they are kept
+// as the connection remote-name with disambiguated local names.
+// ---------------------------------------------------------------------------------------
+
+const SnowflakeNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'Expected a Snowflake identifier')
+  .max(255)
+  .refine(
+    (v) => ![...v].some((ch) => ch.charCodeAt(0) < 32),
+    'Snowflake names cannot contain control characters',
+  );
+
+export const SnowflakeCredentialsSchema = z.object({
+  url: z.string().trim().min(1, 'A Snowflake server URL is required'),
+  warehouse: SnowflakeNameSchema,
+  username: z.string().trim().min(1, 'A Snowflake username is required'),
+  password: z.string().min(1, 'A Snowflake password is required'),
+});
+export type SnowflakeCredentialsInput = z.infer<typeof SnowflakeCredentialsSchema>;
+
+export const SnowflakeMaterializationSchema = z.enum(['live', 'extract']);
+export type SnowflakeMaterializationInput = z.infer<typeof SnowflakeMaterializationSchema>;
+
+export const SnowflakeRelationshipSchema = z.object({
+  leftTable: SnowflakeNameSchema,
+  leftField: SnowflakeNameSchema,
+  rightTable: SnowflakeNameSchema,
+  rightField: SnowflakeNameSchema,
+  cardinality: SalesforceCardinalitySchema.default('many-to-many'),
+  joinType: SalesforceJoinTypeSchema.default('left'),
+});
+
+export const SnowflakeBuildSchema = z
+  .object({
+    credentials: SnowflakeCredentialsSchema,
+    warehouse: SnowflakeNameSchema,
+    database: SnowflakeNameSchema,
+    schema: SnowflakeNameSchema,
+    tables: z.array(SnowflakeNameSchema).min(1, 'Select at least one Snowflake table'),
+    relationships: z.array(SnowflakeRelationshipSchema).default([]),
+    mode: SalesforceBuildModeSchema.default('relationship'),
+    materialization: SnowflakeMaterializationSchema.default('extract'),
+    projectId: z.string().trim().min(1, 'Select a Tableau project/folder to publish into'),
+    datasourceName: z.string().trim().min(1, 'Provide a name for the new datasource'),
+    overwrite: z.boolean().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const tables = val.tables.map((t) => t.trim());
+    const unique = new Set(tables);
+    if (unique.size !== tables.length) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['tables'], message: 'Duplicate tables are not allowed.' });
+    }
+    if (tables.length === 1) {
+      if (val.relationships.length > 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships'],
+          message: 'A single-table datasource cannot have relationships.',
+        });
+      }
+      return;
+    }
+    for (const [i, r] of val.relationships.entries()) {
+      if (!unique.has(r.leftTable.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'leftTable'],
+          message: `Relationship references "${r.leftTable}", which is not one of the selected tables.`,
+        });
+      }
+      if (!unique.has(r.rightTable.trim())) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['relationships', i, 'rightTable'],
+          message: `Relationship references "${r.rightTable}", which is not one of the selected tables.`,
+        });
+      }
+    }
+    if (
+      !isConnected(
+        tables,
+        val.relationships.map((r) => ({ leftObject: r.leftTable, rightObject: r.rightTable })),
+      )
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['relationships'],
+        message: 'The relationships must connect every table into a single joined model.',
+      });
+    }
+  });
+export type SnowflakeBuildInput = z.infer<typeof SnowflakeBuildSchema>;
+
 /** Union-find connectivity check: do the relationship edges connect all tables? */
 function isConnected(tables: string[], relationships: Array<{ leftObject: string; rightObject: string }>): boolean {
   const parent = new Map<string, string>();

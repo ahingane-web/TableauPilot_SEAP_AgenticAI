@@ -5,6 +5,8 @@ import { Busy, ErrorPanel, Collapsible } from './common';
 import { DataModelBuilder, type DataModel } from './DataModelBuilder';
 import { ExcelBuild } from './ExcelBuild';
 import { BigQueryBuild } from './BigQueryBuild';
+import { DataCloudBuild } from './DataCloudBuild';
+import { SnowflakeBuild } from './SnowflakeBuild';
 
 /** Multi-object data-modeling mode: Tableau relationships vs a physical join. */
 type SfMode = 'relationship' | 'join';
@@ -20,7 +22,7 @@ interface SfRelationship {
 }
 
 /** Which connector the "Build datasource" flow targets. */
-type Connector = 'salesforce' | 'excel' | 'bigquery';
+type Connector = 'salesforce' | 'excel' | 'bigquery' | 'datacloud' | 'snowflake';
 
 /**
  * Connect + select destination project + select and LOCK the datasource.
@@ -286,6 +288,8 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                           <option value="salesforce">Salesforce</option>
                           <option value="excel">Excel (.xlsx)</option>
                           <option value="bigquery">Google BigQuery</option>
+                          <option value="datacloud">Salesforce Data Cloud</option>
+                          <option value="snowflake">Snowflake</option>
                         </select>
                       </div>
                     </div>
@@ -313,8 +317,12 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                       />
                     ) : connector === 'excel' ? (
                       <ExcelBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
-                    ) : (
+                    ) : connector === 'bigquery' ? (
                       <BigQueryBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                    ) : connector === 'datacloud' ? (
+                      <DataCloudBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                    ) : (
+                      <SnowflakeBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
                     )}
                   </>
                 )}

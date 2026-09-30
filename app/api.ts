@@ -279,6 +279,98 @@ export const api = {
       }
     >('/api/connectors/bigquery/publish', { method: 'POST', body }),
 
+  // ---- Salesforce Data Cloud connector ----
+  dataCloudConnect: (creds: { url: string; username: string; password: string; token?: string }) =>
+    req<{ connected: true }>('/api/connectors/datacloud/connect', { method: 'POST', body: creds }),
+  dataCloudDataSpaces: () =>
+    req<{ dataSpaces: { name: string; label: string }[] }>('/api/connectors/datacloud/dataspaces'),
+  dataCloudObjects: (dataSpace: string, category: 'dmo' | 'dlo' | 'ci' | 'all' = 'all') =>
+    req<{ objects: { name: string; label: string; category: 'dmo' | 'dlo' | 'ci' }[] }>(
+      `/api/connectors/datacloud/objects?dataSpace=${encodeURIComponent(dataSpace)}&category=${encodeURIComponent(category)}`,
+    ),
+  dataCloudDescribe: (dataSpace: string, object: string) =>
+    req<{ fields: { name: string; label: string; type: string }[] }>('/api/connectors/datacloud/describe', {
+      method: 'POST',
+      body: { dataSpace, object },
+    }),
+  dataCloudPublish: (body: {
+    credentials: { url: string; username: string; password: string; token?: string };
+    dataSpace: string;
+    category?: 'dmo' | 'dlo' | 'ci' | 'all';
+    tables: string[];
+    relationships?: Array<{
+      leftObject: string;
+      leftField: string;
+      rightObject: string;
+      rightField: string;
+      cardinality?: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+      joinType?: 'inner' | 'left' | 'right' | 'full';
+    }>;
+    mode?: 'relationship' | 'join';
+    materialization?: 'live' | 'extract';
+    projectId: string;
+    datasourceName: string;
+    overwrite?: boolean;
+  }) =>
+    req<
+      SessionContext & {
+        datasource: { id: string; name: string; projectName?: string };
+        extract: { state: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
+      }
+    >('/api/connectors/datacloud/publish', { method: 'POST', body }),
+
+  // ---- Snowflake connector ----
+  snowflakeConnect: (creds: { url: string; warehouse: string; username: string; password: string }) =>
+    req<{ connected: true; warehouse: string; host: string }>('/api/connectors/snowflake/connect', {
+      method: 'POST',
+      body: creds,
+    }),
+  snowflakeWarehouses: () =>
+    req<{ warehouses: { name: string; label: string }[] }>('/api/connectors/snowflake/warehouses'),
+  snowflakeDatabases: (warehouse: string) =>
+    req<{ databases: { name: string; label: string }[] }>(
+      `/api/connectors/snowflake/databases?warehouse=${encodeURIComponent(warehouse)}`,
+    ),
+  snowflakeSchemas: (warehouse: string, database: string) =>
+    req<{ schemas: { name: string; label: string }[] }>(
+      `/api/connectors/snowflake/schemas?warehouse=${encodeURIComponent(warehouse)}&database=${encodeURIComponent(database)}`,
+    ),
+  snowflakeTables: (warehouse: string, database: string, schema: string) =>
+    req<{ tables: { name: string; label: string }[] }>(
+      `/api/connectors/snowflake/tables?warehouse=${encodeURIComponent(warehouse)}&database=${encodeURIComponent(database)}&schema=${encodeURIComponent(schema)}`,
+    ),
+  snowflakeDescribe: (warehouse: string, database: string, schema: string, table: string) =>
+    req<{ fields: { name: string; label: string; type: string }[] }>('/api/connectors/snowflake/describe', {
+      method: 'POST',
+      body: { warehouse, database, schema, table },
+    }),
+  snowflakePublish: (body: {
+    credentials: { url: string; warehouse: string; username: string; password: string };
+    warehouse: string;
+    database: string;
+    schema: string;
+    tables: string[];
+    relationships?: Array<{
+      leftTable: string;
+      leftField: string;
+      rightTable: string;
+      rightField: string;
+      cardinality?: 'one-to-one' | 'one-to-many' | 'many-to-one' | 'many-to-many';
+      joinType?: 'inner' | 'left' | 'right' | 'full';
+    }>;
+    mode?: 'relationship' | 'join';
+    materialization?: 'live' | 'extract';
+    projectId: string;
+    datasourceName: string;
+    overwrite?: boolean;
+  }) =>
+    req<
+      SessionContext & {
+        datasource: { id: string; name: string; projectName?: string };
+        extract: { state: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
+      }
+    >('/api/connectors/snowflake/publish', { method: 'POST', body }),
+
   plan: (request: string, workbookName?: string) =>
     req<PlanningResult>('/api/dashboard/plan', { method: 'POST', body: { request, workbookName } }),
   /** Chat: revise the current (unpublished) plan via a natural-language instruction. */

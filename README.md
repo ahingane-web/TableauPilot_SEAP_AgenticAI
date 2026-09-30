@@ -24,8 +24,9 @@ vault** and never reach the browser or the LLM.
 - **Security & the PIN vault:** [docs/security.md](./docs/security.md)
 - **Python usage (Hyper extract sidecar):** [docs/python-dependency-decision.md](./docs/python-dependency-decision.md)
 
-It can also connect to **Salesforce** and publish an extract-backed Tableau datasource
-(one or more objects, optionally modeled as relationships or physical joins).
+It can also **Build a datasource** from **Salesforce**, **Excel**, **Google BigQuery**,
+**Salesforce Data Cloud**, or **Snowflake** (relationships or physical joins; Live or Extract
+where the source supports it — Excel is extract-only).
 
 ## Requirements
 
@@ -43,7 +44,7 @@ cp .env.example .env
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"   # for VAULT_PEPPER
 
 # (optional) for the extract-datasource builders — creates .venv-hyper with the
-# Tableau Hyper API (Python). Needed for the Salesforce, Excel, and BigQuery-extract connectors.
+# Tableau Hyper API (Python). Needed for the Salesforce, Excel, BigQuery-extract, Data Cloud-extract, and Snowflake-extract connectors.
 npm run setup:hyper
 ```
 
@@ -59,7 +60,8 @@ Key env vars (full list + comments in [.env.example](./.env.example)):
 | `VAULT_PEPPER` | **required** server-only pepper for the PIN KDF |
 | `DATA_PATH` | encrypted vault + storage dir (git-ignored) |
 | `API_PORT` / `WEB_PORT` / `CORS_ORIGINS` | app wiring |
-| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce, Excel + BigQuery-extract connectors) |
+| `HYPER_PYTHON` | path to the Hyper API Python interpreter (defaults to `.venv-hyper`; Salesforce, Excel, BigQuery-extract, Data Cloud-extract, Snowflake-extract connectors) |
+| `HYPER_MAX_ROWS` | cap on rows queried per table when materializing an extract (default `100000`) |
 | `SALESFORCE_OAUTH_CLIENT_ID` / `SALESFORCE_OAUTH_CLIENT_SECRET` / `SALESFORCE_OAUTH_REDIRECT_URI` | Salesforce browser-OAuth (optional; username/password works without them) |
 | `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` / `GOOGLE_OAUTH_REDIRECT_URI` | Google BigQuery browser-OAuth (**optional** — if unset, the UI asks for the Client ID/secret at sign-in and can save it encrypted in the user's vault; redirect defaults to `…/api/connectors/bigquery/oauth/callback`) |
 
@@ -112,6 +114,23 @@ embedded + an extract refresh is triggered.
 project as an **extract-only** datasource — the workbook's data is bundled in a `.hyper` (no live
 file connection, no embedded credential, no refresh). Uses the same Hyper sidecar as Salesforce.
 
+**Or build a Google BigQuery data source** — pick **Google BigQuery**, sign in with Google
+(browser OAuth), pick Billing Project → Project → Dataset, model tables (Relationship or Join),
+then choose **Live** or **Extract**. Extract uses the Hyper sidecar and a post-publish refresh;
+Live publishes a bare `.tds`. Both embed your saved Google BigQuery OAuth credential on Tableau Cloud.
+
+**Or build a Salesforce Data Cloud data source** — pick **Salesforce Data Cloud**, sign in with
+the same username/password form as Salesforce, pick a **Data Space** and object type (DMO / DLO /
+Calculated Insights / All), model objects (Relationship or Join), then choose **Live** or
+**Extract**. Extract uses the Hyper sidecar and a post-publish refresh; Live publishes a bare
+`.tds`. Both embed your saved Salesforce Data Cloud OAuth credential on Tableau Cloud.
+
+**Or build a Snowflake data source** — pick **Snowflake**, sign in with server URL / warehouse /
+username / password, pick **Warehouse → Database → Schema**, model tables (Relationship or
+Join), then choose **Live** or **Extract**. Extract uses the Hyper sidecar and a post-publish
+refresh; Live publishes a bare `.tds`. Both embed the Snowflake username/password on the
+Tableau Cloud connection.
+
 **Interface** — a light, Tableau-themed two-pane layout: the AI workflow on the left and the
 read-only published dashboard on the right. Use **Hide/Show dashboard** in the top bar to
 collapse the preview and give the workflow full width, and the collapsible **Datasource
@@ -146,6 +165,10 @@ stay server-side.
 - `POST /api/connectors/bigquery/oauth/start`, `GET /api/connectors/bigquery/{oauth/callback,status,projects,datasets,tables}`,
   `GET|POST /api/connectors/bigquery/oauth/client` (save/read the per-user OAuth client in the vault),
   `POST /api/connectors/bigquery/{describe,publish}` (Google BigQuery, **live or extract**)
+- `POST /api/connectors/datacloud/connect`, `GET /api/connectors/datacloud/{dataspaces,objects}`,
+  `POST /api/connectors/datacloud/{describe,publish}` (Salesforce Data Cloud, **live or extract**)
+- `POST /api/connectors/snowflake/connect`, `GET /api/connectors/snowflake/{warehouses,databases,schemas,tables}`,
+  `POST /api/connectors/snowflake/{describe,publish}` (Snowflake, **live or extract**)
 
 ## Testing
 

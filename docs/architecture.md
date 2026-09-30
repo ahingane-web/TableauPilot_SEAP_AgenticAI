@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-09-29.
+> decisions change. Last updated: 2026-09-30.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -52,8 +52,12 @@ Mastra instance (src/mastra) ── `mastra dev` ──► Mastra Studio
 | **llm** | `llm/index.ts` | Provider-agnostic model resolution (Anthropic gateway or OpenRouter); custom fetch w/ key-helper + CA cert. |
 | **vault** | `vault/*` | Per-user PIN-encrypted credential store + in-memory sessions + `VaultService`. |
 | **schemas** | `schemas/*` | Zod schemas for the whole `DashboardPlan` contract. |
-| **tableau** | `tableau/*` | The ONLY place that talks HTTP to Tableau. Client + `auth`, `discovery`, `datasources` (Metadata API), `permissions`, `authoring` (`.twb`/`.twbx` + Salesforce `.tds`), `publishing` (workbooks, Salesforce `.tdsx` via `hyperPackager`, connection embed/refresh), `verification`, and the `TableauService` façade (session-scoped). |
+| **tableau** | `tableau/*` | The ONLY place that talks HTTP to Tableau. Client + `auth`, `discovery`, `datasources` (Metadata API), `permissions`, `authoring` (`.twb`/`.twbx` + Salesforce/Excel/BigQuery/Data Cloud/Snowflake `.tds`), `publishing` (workbooks, extract `.tdsx` via `hyperPackager`, connection embed/refresh), `verification`, and the `TableauService` façade (session-scoped). |
 | **salesforce** | `salesforce/*` | Salesforce connectivity: SOAP `login` + REST `describe`/`query` + API-version auto-discovery (`client.ts`); browser OAuth PKCE (`oauth.ts`, `oauthStore.ts`). Session state is transient (in-memory). |
+| **excel** | `excel/*` | Excel workbook parse (`excelClient.ts`, `exceljs`). Transient upload on the session. Does not talk to Tableau. |
+| **bigquery** | `bigquery/*` | Google BigQuery: browser OAuth PKCE + BigQuery/Cloud Resource Manager REST (`client.ts`, `oauth.ts`, `oauthStore.ts`). Session state is transient. Does not talk to Tableau. |
+| **datacloud** | `datacloud/*` | Salesforce Data Cloud (Genie) connectivity: imports Salesforce SOAP `login` (unmodified), CDP token exchange, data spaces, metadata, Query API (`client.ts`). Session state is transient (in-memory). Does not talk to Tableau. |
+| **snowflake** | `snowflake/*` | Snowflake connectivity: session login + SHOW/DESCRIBE/SELECT (`client.ts`). Session token + password are transient (in-memory). Does not talk to Tableau. |
 | **hyper sidecar** | `scripts/hyper/build_tdsx.py` | Python Hyper API script (only Python in the repo) that writes a `.hyper` and zips it with the `.tds` into a `.tdsx`; invoked as a subprocess by `tableau/publishing/hyperPackager.ts`. |
 | **validation** | `validation/{fieldValidation,guards}.ts` | Field validation vs live metadata; deterministic guards (lock/project/approval). |
 | **processors** | `processors/*` | LLM secret-protection input processor + guard re-exports. |
@@ -68,7 +72,8 @@ Mastra instance (src/mastra) ── `mastra dev` ──► Mastra Studio
 | **server** | `server/*` | Hono BFF exposing `/api/*`; bootstrap + prod SPA serving. |
 
 Frontend (`app/`): `App.tsx` orchestrator; `api.ts` typed client (stores only session
-id); components `ConnectionPanel`, `CredentialsPanel`, `SetupPanel`, `PlanPanel`,
+id); components `ConnectionPanel`, `CredentialsPanel`, `SetupPanel` (Build-datasource
+switch: Salesforce / Excel / BigQuery / Data Cloud / Snowflake), `PlanPanel`,
 `AuthoringPanel`, `common`.
 
 ## 3. Data flow — the main path (`dashboardCreationWorkflow`)
@@ -160,6 +165,63 @@ datasource is connectable/refreshable. LIVE runs nothing after publish (Tableau 
 BigQuery directly); EXTRACT triggers a refresh (best-effort — the bundled `.hyper` already
 holds data queried at publish time).
 
+## 3e. Data flow — Salesforce Data Cloud datasource (`buildAndPublishDataCloudDatasource`)
+
+The fourth connector plugs into the SAME pluggable "Build datasource" flow (shared
+`DataModelBuilder`) with a **Live/Extract** choice. Data Cloud objects (DMO / DLO /
+Calculated Insights) in a selected **data space** play the role Salesforce objects play.
+Authentication is the same **username/password SOAP login** as CRM Salesforce (imported,
+unmodified), then a CDP token exchange; tokens are held only on
+`session.connectors.datacloud` (in-memory).
+
+```
+SOAP login (imported Salesforce.login)  →  CDP token POST /services/a360/token
+  → list data spaces  →  pick category (DMO / DLO / CI / All)  →  list objects
+  → user models OBJECTS in the shared DataModelBuilder (mode + relationships/joins)
+  → describe each object (Data Cloud metadata)  [+ for EXTRACT: Query API rows]
+  → generate .tds via dataCloudTdsGenerator  (class='salesforce-genie' OAuth connection +
+       [public].[apiName] relations; real field API names kept as remote-name)
+  → LIVE:    publish a bare .tds   (no <extract>)          →  embed Data Cloud OAuth cred
+    EXTRACT: materialize .hyper + package .tdsx (Python sidecar) → publish → embed cred
+             → server-side extract refresh (refreshDatasourceNow)
+  → lock datasource + cache field identities  →  converge on the normal dashboard flow
+```
+
+The tokens are cleared once publishing completes. Both shapes embed the publisher's
+**saved Salesforce Data Cloud OAuth credential** on Tableau Cloud (matched by username),
+so the datasource is connectable/refreshable. LIVE runs nothing after publish (Tableau
+queries Data Cloud directly); EXTRACT triggers a refresh (best-effort — the bundled
+`.hyper` already holds data queried at publish time). Nested/complex fields are skipped.
+
+## 3f. Data flow — Snowflake datasource (`buildAndPublishSnowflakeDatasource`)
+
+The fifth connector plugs into the SAME pluggable "Build datasource" flow (shared
+`DataModelBuilder`) with a **Live/Extract** choice. Snowflake tables in a selected
+**warehouse / database / schema** play the role Salesforce objects play. Authentication
+is **username/password session login**; the token is held only on
+`session.connectors.snowflake` (in-memory).
+
+```
+session login POST /session/v1/login-request
+  → list warehouses  →  pick warehouse (case-insensitive preselect)  →  list databases
+  → pick database  →  list schemas  →  pick schema  →  list tables
+  → user models TABLES in the shared DataModelBuilder (mode + relationships/joins)
+  → describe each table  [+ for EXTRACT: positional SELECT rows]
+  → generate .tds via snowflakeTdsGenerator  (class='snowflake' Username Password +
+       [DATABASE].[SCHEMA].[TABLE] relations; real column names kept as remote-name;
+       object-id MD5(db.schema.table) — not Desktop's proprietary hash)
+  → LIVE:    publish a bare .tds   (no <extract>)          →  embed username/password
+    EXTRACT: materialize .hyper + package .tdsx (Python sidecar) → publish → embed password
+             → server-side extract refresh (refreshDatasourceNow)
+  → lock datasource + cache field identities  →  converge on the normal dashboard flow
+```
+
+The session token and password are cleared once publishing completes. Both shapes embed
+the Snowflake **username/password** on the Tableau Cloud connection (not OAuth). LIVE
+runs nothing after publish (Tableau queries Snowflake directly); EXTRACT triggers a
+refresh (best-effort — the bundled `.hyper` already holds data queried at publish time).
+Nested/VARIANT columns are skipped.
+
 ## 4. Trust & secret boundaries
 
 - **Browser** ↔ **BFF**: only an opaque `x-session-id` and non-secret payloads. Errors
@@ -193,7 +255,8 @@ holds data queried at publish time).
   tools, workflows, and service layer.
 - **TypeScript/Node, with one narrow Python exception.** Everything is TS/Node except a
   Python **Hyper API sidecar** (`scripts/hyper/build_tdsx.py`) used solely to materialize
-  Salesforce `.hyper` extracts (the Hyper API has no Node binding). (See
+  Build-datasource `.hyper` extracts (Salesforce, Excel, BigQuery extract, Data Cloud extract,
+  Snowflake extract; the Hyper API has no Node binding). (See
   [python-dependency-decision.md](./python-dependency-decision.md).)
 - **Salesforce extract datasources.** A second entry point connects to Salesforce, builds
   a `.tds` (single / relationships / physical-join) + a locally-materialized `.hyper`

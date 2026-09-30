@@ -75,10 +75,40 @@ import {
   type BigQueryConnectionInfo,
   type BigQueryFieldIdentity,
 } from './authoring/bigqueryTdsGenerator.js';
+import {
+  generateDataCloudTds,
+  generateDataCloudRelationshipsTds,
+  generateDataCloudPhysicalJoinTds,
+  dataCloudObjectId,
+  dataCloudToHyperType,
+  dataCloudFieldIdentities,
+  type DataCloudMaterialization,
+  type DataCloudTableSpec,
+  type DataCloudRelationshipSpec,
+  type DataCloudConnectionInfo,
+  type DataCloudFieldIdentity,
+} from './authoring/dataCloudTdsGenerator.js';
+import {
+  generateSnowflakeTds,
+  generateSnowflakeRelationshipsTds,
+  generateSnowflakePhysicalJoinTds,
+  snowflakeObjectId,
+  snowflakeToHyperType,
+  snowflakeFieldIdentities,
+  type SnowflakeMaterialization,
+  type SnowflakeTableSpec,
+  type SnowflakeRelationshipSpec,
+  type SnowflakeConnectionInfo,
+  type SnowflakeFieldIdentity,
+} from './authoring/snowflakeTdsGenerator.js';
 import { buildExtractTdsx, type ExtractColumn, type ExtractTable } from './publishing/hyperPackager.js';
 import { parseWorkbook, type ExcelSheet, type ExcelColumn } from '../excel/excelClient.js';
 import * as BigQuery from '../bigquery/client.js';
 import type { BigQueryField } from '../bigquery/client.js';
+import * as DataCloud from '../datacloud/client.js';
+import type { DataCloudAuth, DataCloudField, DataCloudObjectCategory } from '../datacloud/client.js';
+import * as Snowflake from '../snowflake/client.js';
+import type { SnowflakeAuth, SnowflakeCredentials, SnowflakeField } from '../snowflake/client.js';
 import * as BigQueryOauth from '../bigquery/oauth.js';
 import { putPendingBigQueryOauth, takePendingBigQueryOauth } from '../bigquery/oauthStore.js';
 
@@ -365,6 +395,127 @@ async function bigQueryAuth(session: Session): Promise<BigQuery.BigQueryAuth> {
   return { accessToken: bq.accessToken };
 }
 
+function dataCloudIdentityToDatasourceField(id: DataCloudFieldIdentity): DatasourceField {
+  const twb = id.twb;
+  const dataType =
+    twb === 'integer'
+      ? 'INTEGER'
+      : twb === 'real'
+        ? 'REAL'
+        : twb === 'boolean'
+          ? 'BOOLEAN'
+          : twb === 'date'
+            ? 'DATE'
+            : twb === 'datetime'
+              ? 'DATETIME'
+              : 'STRING';
+  const isDate = twb === 'date' || twb === 'datetime';
+  const role: FieldRole = twb === 'integer' || twb === 'real' ? 'measure' : 'dimension';
+  return { name: id.local, role, dataType, isDate, fieldType: 'ColumnField' };
+}
+
+function dataCloudTablesToMetadata(
+  datasourceId: string,
+  datasourceName: string,
+  tables: DataCloudTableSpec[],
+): DatasourceMetadata {
+  const identities = dataCloudFieldIdentities(tables);
+  const seen = new Set<string>();
+  const mapped: DatasourceField[] = [];
+  for (const id of identities) {
+    if (seen.has(id.local)) continue;
+    seen.add(id.local);
+    mapped.push(dataCloudIdentityToDatasourceField(id));
+  }
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+function dataCloudAuth(session: Session): DataCloudAuth {
+  const dc = session.connectors?.datacloud;
+  if (!dc?.cdp?.accessToken) {
+    throw new AppError('CONNECTOR_API', 'Not signed in to Salesforce Data Cloud. Connect first.');
+  }
+  return dc.cdp;
+}
+
+/**
+ * Salesforce scopes the CDP token by data space. Re-exchange when the caller asks for
+ * a space the current token was not issued for.
+ */
+async function dataCloudAuthForSpace(session: Session, dataSpace: string): Promise<DataCloudAuth> {
+  const dc = session.connectors?.datacloud;
+  if (!dc?.cdp?.accessToken || !dc.sfSession) {
+    throw new AppError('CONNECTOR_API', 'Not signed in to Salesforce Data Cloud. Connect first.');
+  }
+  const wanted = String(dataSpace ?? '').trim();
+  const current = (dc.cdp.dataSpace || 'default').trim();
+  if (wanted && current !== wanted) {
+    dc.cdp = await DataCloud.exchangeCdpToken(dc.sfSession, wanted);
+  }
+  return dc.cdp;
+}
+
+function snowflakeIdentityToDatasourceField(id: SnowflakeFieldIdentity): DatasourceField {
+  const twb = id.twb;
+  const dataType =
+    twb === 'integer'
+      ? 'INTEGER'
+      : twb === 'real'
+        ? 'REAL'
+        : twb === 'boolean'
+          ? 'BOOLEAN'
+          : twb === 'date'
+            ? 'DATE'
+            : twb === 'datetime'
+              ? 'DATETIME'
+              : 'STRING';
+  const isDate = twb === 'date' || twb === 'datetime';
+  const role: FieldRole = twb === 'integer' || twb === 'real' ? 'measure' : 'dimension';
+  return { name: id.local, role, dataType, isDate, fieldType: 'ColumnField' };
+}
+
+function snowflakeTablesToMetadata(
+  datasourceId: string,
+  datasourceName: string,
+  database: string,
+  schema: string,
+  tables: SnowflakeTableSpec[],
+): DatasourceMetadata {
+  const identities = snowflakeFieldIdentities(database, schema, tables);
+  const seen = new Set<string>();
+  const mapped: DatasourceField[] = [];
+  for (const id of identities) {
+    if (seen.has(id.local)) continue;
+    seen.add(id.local);
+    mapped.push(snowflakeIdentityToDatasourceField(id));
+  }
+  return {
+    datasourceId,
+    datasourceName,
+    fields: mapped,
+    dimensions: mapped.filter((f) => f.role === 'dimension'),
+    measures: mapped.filter((f) => f.role === 'measure'),
+    dates: mapped.filter((f) => f.isDate),
+    metadataApiAvailable: true,
+  };
+}
+
+function snowflakeAuth(session: Session): SnowflakeAuth {
+  const sf = session.connectors?.snowflake;
+  if (!sf?.auth?.token) {
+    throw new AppError('CONNECTOR_API', 'Not signed in to Snowflake. Connect first.');
+  }
+  return sf.auth;
+}
+
 export const TableauService = {
   /** Sign in to Tableau Cloud using the vault's PAT credentials. */
   async connect(session: Session): Promise<{ siteId: string; siteContentUrl: string; userId: string; serverUrl: string }> {
@@ -457,6 +608,8 @@ export const TableauService = {
       { id: 'salesforce', label: 'Salesforce' },
       { id: 'excel', label: 'Excel (.xlsx)' },
       { id: 'bigquery', label: 'Google BigQuery' },
+      { id: 'datacloud', label: 'Salesforce Data Cloud' },
+      { id: 'snowflake', label: 'Snowflake' },
     ];
   },
 
@@ -1379,6 +1532,558 @@ export const TableauService = {
         `${anyCapped ? ` (some tables capped at ${maxRows.toLocaleString()})` : ''}.${refreshNote}`;
     } else {
       message = `Published a LIVE BigQuery datasource${tableSummary}. Tableau Cloud queries BigQuery directly over OAuth.`;
+    }
+    const extractResult: ExtractResult = { state: 'succeeded', message };
+    return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract: extractResult };
+  },
+
+  /**
+   * Connect to Salesforce Data Cloud: SOAP login (imported Salesforce.login) + CDP token
+   * exchange. The live sessions are stored transiently on the session so subsequent list /
+   * describe / publish calls can use them. Nothing is logged.
+   */
+  async dataCloudConnect(session: Session, creds: SalesforceCredentials): Promise<{ connected: true }> {
+    requireAuth(session);
+    const { sfSession, cdp } = await DataCloud.connect(creds);
+    session.connectors = {
+      ...(session.connectors ?? {}),
+      datacloud: { creds, sfSession, cdp },
+    };
+    return { connected: true };
+  },
+
+  /** List Data Cloud data spaces visible to the signed-in user. */
+  async dataCloudListDataSpaces(session: Session): Promise<DataCloud.DataCloudDataSpace[]> {
+    requireAuth(session);
+    return DataCloud.listDataSpaces(dataCloudAuth(session));
+  },
+
+  /** List Data Cloud objects in a data space, filterable by category (DMO / DLO / CI / all). */
+  async dataCloudListObjects(
+    session: Session,
+    dataSpace: string,
+    category: DataCloudObjectCategory = 'all',
+  ): Promise<DataCloud.DataCloudObject[]> {
+    requireAuth(session);
+    return DataCloud.listObjects(await dataCloudAuthForSpace(session, dataSpace), dataSpace, category);
+  },
+
+  /**
+   * Describe a Data Cloud object's scalar columns (name/label/type) for the relationship
+   * builder's join-field dropdowns. Returns non-secret field identity only.
+   */
+  async dataCloudDescribeObject(
+    session: Session,
+    dataSpace: string,
+    objectName: string,
+  ): Promise<Array<{ name: string; label: string; type: string }>> {
+    requireAuth(session);
+    const fields = await DataCloud.describeObject(
+      await dataCloudAuthForSpace(session, dataSpace),
+      dataSpace,
+      objectName,
+    );
+    return fields.map((f) => ({ name: f.name, label: f.label, type: f.type }));
+  },
+
+  /**
+   * Build a Salesforce Data Cloud (Genie) datasource (single object, or multiple objects
+   * joined via relationships / physical join) and publish it to the given Tableau Cloud
+   * project, then lock it as the session's source of truth.
+   *
+   * `materialization: 'live'` publishes a bare `.tds` (`class='salesforce-genie'`, no
+   * `<extract>`); nothing runs afterwards. `materialization: 'extract'` queries the selected
+   * objects' rows, materializes them into a local `.hyper` (Python Hyper sidecar), publishes
+   * the packaged `.tdsx`, then (best-effort) embeds the saved Data Cloud OAuth credential and
+   * kicks off a server-side extract refresh. Both forms embed the Salesforce username so the
+   * datasource matches the publisher's saved Salesforce Data Cloud OAuth credential.
+   */
+  async buildAndPublishDataCloudDatasource(
+    session: Session,
+    input: {
+      credentials: SalesforceCredentials;
+      dataSpace: string;
+      category?: DataCloudObjectCategory;
+      tables: string[];
+      relationships?: DataCloudRelationshipSpec[];
+      mode?: SalesforceBuildMode;
+      materialization?: DataCloudMaterialization;
+      projectId: string;
+      datasourceName: string;
+      overwrite?: boolean;
+    },
+  ): Promise<{
+    datasource: TableauDatasource;
+    lock: DatasourceLock;
+    projectContext: TableauProjectContext;
+    extract: ExtractResult;
+  }> {
+    requireAuth(session);
+    let dc = session.connectors?.datacloud;
+    if (!dc?.cdp?.accessToken) {
+      const connected = await DataCloud.connect(input.credentials);
+      dc = { creds: input.credentials, sfSession: connected.sfSession, cdp: connected.cdp };
+      session.connectors = { ...(session.connectors ?? {}), datacloud: dc };
+    }
+    const username = dc.creds.username;
+    const auth = await dataCloudAuthForSpace(session, input.dataSpace);
+
+    const tables = (input.tables ?? []).map((t) => String(t ?? '').trim());
+    if (tables.length === 0) {
+      throw new AppError('VALIDATION', 'Select at least one Data Cloud object to build a datasource.');
+    }
+    if (new Set(tables).size !== tables.length) {
+      throw new AppError('VALIDATION', 'Duplicate Data Cloud objects are not allowed.');
+    }
+
+    const project = (await this.listProjects(session)).find((p) => p.id === input.projectId);
+    if (!project) {
+      throw new AppError('NOT_FOUND', 'Target project not found among your accessible projects.');
+    }
+
+    const maxRows = getConfig().hyper.maxRows;
+    const materialization: DataCloudMaterialization = input.materialization ?? 'extract';
+    const isExtract = materialization === 'extract';
+    const relationships = input.relationships ?? [];
+
+    const listed = await DataCloud.listObjects(auth, input.dataSpace, input.category ?? 'all').catch(
+      (): DataCloud.DataCloudObject[] => [],
+    );
+    const captionByName = new Map(listed.map((o) => [o.name, o.label]));
+
+    const described: Array<{
+      object: string;
+      caption: string;
+      fields: DataCloudField[];
+      rows: Array<Array<unknown>>;
+    }> = [];
+    for (const object of tables) {
+      const fields = await DataCloud.describeObject(auth, input.dataSpace, object);
+      if (fields.length === 0) {
+        throw new AppError('CONNECTOR_API', `Data Cloud object "${object}" exposes no scalar columns to model.`);
+      }
+      const caption = captionByName.get(object) ?? object;
+      const rows = isExtract
+        ? await DataCloud.queryRows(auth, {
+            dataSpace: input.dataSpace,
+            objectName: object,
+            fields,
+            maxRows,
+          })
+        : [];
+      described.push({ object, caption, fields, rows });
+    }
+
+    const fieldSetByObject = new Map(described.map((d) => [d.object, new Set(d.fields.map((f) => f.name))]));
+    for (const r of relationships) {
+      if (!fieldSetByObject.get(r.leftObject)?.has(r.leftField)) {
+        throw new AppError('VALIDATION', `Join field "${r.leftField}" was not found on object "${r.leftObject}".`);
+      }
+      if (!fieldSetByObject.get(r.rightObject)?.has(r.rightField)) {
+        throw new AppError('VALIDATION', `Join field "${r.rightField}" was not found on object "${r.rightObject}".`);
+      }
+    }
+
+    const conn: DataCloudConnectionInfo = {
+      instanceUrl: dc.sfSession.instanceUrl.replace(/\/+$/, ''),
+      server: auth.instanceUrl.replace(/^https?:\/\//i, '').replace(/\/+$/, ''),
+      username,
+      dataSpace: input.dataSpace,
+      tenantId: auth.tenantId,
+      pod: auth.pod,
+    };
+    const tableSpecs: DataCloudTableSpec[] = described.map((d) => ({
+      object: d.object,
+      caption: d.caption,
+      columns: d.fields.map((f) => ({ name: f.name, dcType: f.type, nillable: f.nillable })),
+    }));
+    const isMulti = described.length > 1;
+    const mode = input.mode ?? 'relationship';
+
+    const hyperName = `federated_${randomBytes(10).toString('hex')}.hyper`;
+    const hyperDbname = `Data/Extracts/${hyperName}`;
+    const extract = isExtract ? { hyperDbname } : undefined;
+
+    let tdsXml: string;
+    if (isMulti) {
+      const relInput = {
+        datasourceName: input.datasourceName,
+        connection: conn,
+        materialization,
+        tables: tableSpecs,
+        relationships,
+        extract,
+      };
+      tdsXml =
+        mode === 'join'
+          ? generateDataCloudPhysicalJoinTds(relInput)
+          : generateDataCloudRelationshipsTds(relInput);
+    } else {
+      tdsXml = generateDataCloudTds({
+        datasourceName: input.datasourceName,
+        connection: conn,
+        materialization,
+        object: described[0]!.object,
+        caption: described[0]!.caption,
+        columns: tableSpecs[0]!.columns,
+        extract,
+      });
+    }
+
+    let published;
+    if (isExtract) {
+      const extractTables: ExtractTable[] = described.map((d) => ({
+        object: dataCloudObjectId(d.caption, d.object),
+        schema: d.fields.map((f) => ({ name: f.name, type: dataCloudToHyperType(f.type) })) as ExtractColumn[],
+        rows: d.rows,
+      }));
+      const tdsxBuffer = await buildExtractTdsx({ tdsXml, hyperName, tables: extractTables });
+      published = await publishDatasource(getClient(session), {
+        siteId: siteId(session),
+        projectId: project.id,
+        datasourceName: input.datasourceName,
+        tdsxBuffer,
+        overwrite: input.overwrite,
+        connectionCredentials: { name: username, oAuth: true, embed: true },
+      });
+    } else {
+      published = await publishDatasource(getClient(session), {
+        siteId: siteId(session),
+        projectId: project.id,
+        datasourceName: input.datasourceName,
+        tdsXml,
+        overwrite: input.overwrite,
+        connectionCredentials: { name: username, oAuth: true, embed: true },
+      });
+    }
+
+    this.setProjectContext(session, { siteId: siteId(session), projectId: project.id, projectName: project.name });
+
+    const ds: TableauDatasource = {
+      id: published.id,
+      name: published.name,
+      contentUrl: published.contentUrl,
+      projectId: published.projectId,
+      projectName: published.projectName,
+    };
+    const lock = this.lockDatasource(session, ds);
+
+    session.flow.connectorMetadata = {
+      ...(session.flow.connectorMetadata ?? {}),
+      [ds.id]: dataCloudTablesToMetadata(ds.id, ds.name, tableSpecs),
+    };
+
+    session.connectors = undefined;
+
+    try {
+      const conns = await listDatasourceConnections(getClient(session), siteId(session), ds.id);
+      for (const c of conns) {
+        await embedDatasourceConnectionCredential(getClient(session), siteId(session), ds.id, c.id, {
+          userName: username,
+        });
+      }
+    } catch (err) {
+      log.warn('Could not embed saved Data Cloud credential on datasource connection after publish', {
+        datasourceId: ds.id,
+        error: err instanceof AppError ? err.message : String(err),
+      });
+    }
+
+    let refreshNote = '';
+    if (isExtract) {
+      try {
+        const { jobId } = await refreshDatasourceNow(getClient(session), siteId(session), ds.id);
+        refreshNote = jobId
+          ? ` Started a server-side extract refresh (job ${jobId}).`
+          : ' Started a server-side extract refresh.';
+      } catch (err) {
+        log.warn('Could not start Data Cloud extract refresh after publish', {
+          datasourceId: ds.id,
+          error: err instanceof AppError ? err.message : String(err),
+        });
+        refreshNote =
+          ' Note: could not start the extract refresh automatically — verify your saved Salesforce Data Cloud credential on Tableau Cloud, then use "Refresh Extracts" on the datasource.';
+      }
+    }
+
+    const tableSummary = isMulti ? ` across ${described.length} objects` : '';
+    let message: string;
+    if (isExtract) {
+      const totalRows = described.reduce((sum, d) => sum + d.rows.length, 0);
+      const anyCapped = described.some((d) => d.rows.length >= maxRows);
+      message =
+        `Extract built with ${totalRows.toLocaleString()} row(s)${tableSummary}` +
+        `${anyCapped ? ` (some objects capped at ${maxRows.toLocaleString()})` : ''}.${refreshNote}`;
+    } else {
+      message = `Published a LIVE Salesforce Data Cloud datasource${tableSummary}. Tableau Cloud queries Data Cloud directly over OAuth.`;
+    }
+    const extractResult: ExtractResult = { state: 'succeeded', message };
+    return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract: extractResult };
+  },
+
+  /**
+   * Connect to Snowflake with username/password. The live session + credentials are
+   * stored transiently on the (memory-only) session so listing and publish can reuse them.
+   */
+  async snowflakeConnect(
+    session: Session,
+    creds: SnowflakeCredentials,
+  ): Promise<{ connected: true; warehouse: string; host: string }> {
+    requireAuth(session);
+    const auth = await Snowflake.connect(creds);
+    session.connectors = { ...(session.connectors ?? {}), snowflake: { creds, auth } };
+    return { connected: true, warehouse: auth.warehouse, host: auth.host };
+  },
+
+  async snowflakeListWarehouses(session: Session): Promise<Array<{ name: string; label: string }>> {
+    requireAuth(session);
+    return Snowflake.listWarehouses(snowflakeAuth(session));
+  },
+
+  async snowflakeListDatabases(
+    session: Session,
+    warehouse: string,
+  ): Promise<Array<{ name: string; label: string }>> {
+    requireAuth(session);
+    return Snowflake.listDatabases(snowflakeAuth(session), warehouse);
+  },
+
+  async snowflakeListSchemas(
+    session: Session,
+    warehouse: string,
+    database: string,
+  ): Promise<Array<{ name: string; label: string }>> {
+    requireAuth(session);
+    return Snowflake.listSchemas(snowflakeAuth(session), warehouse, database);
+  },
+
+  async snowflakeListTables(
+    session: Session,
+    warehouse: string,
+    database: string,
+    schema: string,
+  ): Promise<Array<{ name: string; label: string }>> {
+    requireAuth(session);
+    return Snowflake.listTables(snowflakeAuth(session), warehouse, database, schema);
+  },
+
+  async snowflakeDescribeTable(
+    session: Session,
+    warehouse: string,
+    database: string,
+    schema: string,
+    table: string,
+  ): Promise<Array<{ name: string; label: string; type: string }>> {
+    requireAuth(session);
+    const fields = await Snowflake.describeTable(snowflakeAuth(session), warehouse, database, schema, table);
+    return fields.map((f) => ({ name: f.name, label: f.label, type: f.type }));
+  },
+
+  /**
+   * Build a Snowflake datasource (single table, or multiple tables joined via
+   * relationships / physical join) and publish it to the given Tableau Cloud project,
+   * then lock it as the session's source of truth.
+   *
+   * `materialization: 'live'` publishes a bare `.tds` (`class='snowflake'`, Username
+   * Password, no `<extract>`); nothing runs afterwards. `materialization: 'extract'`
+   * queries the selected tables' rows, materializes them into a local `.hyper`, publishes
+   * the packaged `.tdsx`, then (best-effort) kicks off a server-side extract refresh.
+   * Both forms embed the Snowflake username/password on the published connection.
+   */
+  async buildAndPublishSnowflakeDatasource(
+    session: Session,
+    input: {
+      credentials: SnowflakeCredentials;
+      warehouse: string;
+      database: string;
+      schema: string;
+      tables: string[];
+      relationships?: SnowflakeRelationshipSpec[];
+      mode?: SalesforceBuildMode;
+      materialization?: SnowflakeMaterialization;
+      projectId: string;
+      datasourceName: string;
+      overwrite?: boolean;
+    },
+  ): Promise<{
+    datasource: TableauDatasource;
+    lock: DatasourceLock;
+    projectContext: TableauProjectContext;
+    extract: ExtractResult;
+  }> {
+    requireAuth(session);
+    let sf = session.connectors?.snowflake;
+    if (!sf?.auth?.token) {
+      const auth = await Snowflake.connect(input.credentials);
+      sf = { creds: input.credentials, auth };
+      session.connectors = { ...(session.connectors ?? {}), snowflake: sf };
+    }
+    const username = sf.creds.username;
+    const password = sf.creds.password;
+    const auth = sf.auth;
+
+    const tables = (input.tables ?? []).map((t) => String(t ?? '').trim());
+    if (tables.length === 0) {
+      throw new AppError('VALIDATION', 'Select at least one Snowflake table to build a datasource.');
+    }
+    if (new Set(tables).size !== tables.length) {
+      throw new AppError('VALIDATION', 'Duplicate Snowflake tables are not allowed.');
+    }
+
+    const project = (await this.listProjects(session)).find((p) => p.id === input.projectId);
+    if (!project) {
+      throw new AppError('NOT_FOUND', 'Target project not found among your accessible projects.');
+    }
+
+    const maxRows = getConfig().hyper.maxRows;
+    const materialization: SnowflakeMaterialization = input.materialization ?? 'extract';
+    const isExtract = materialization === 'extract';
+    const relationships = input.relationships ?? [];
+
+    const described: Array<{ table: string; fields: SnowflakeField[]; rows: Array<Array<unknown>> }> = [];
+    for (const table of tables) {
+      const fields = await Snowflake.describeTable(auth, input.warehouse, input.database, input.schema, table);
+      if (fields.length === 0) {
+        throw new AppError('CONNECTOR_API', `Snowflake table "${table}" exposes no scalar columns to model.`);
+      }
+      const rows = isExtract
+        ? await Snowflake.queryRows(auth, {
+            warehouse: input.warehouse,
+            database: input.database,
+            schema: input.schema,
+            table,
+            fields,
+            maxRows,
+          })
+        : [];
+      described.push({ table, fields, rows });
+    }
+
+    const fieldSetByTable = new Map(described.map((d) => [d.table, new Set(d.fields.map((f) => f.name))]));
+    for (const r of relationships) {
+      if (!fieldSetByTable.get(r.leftTable)?.has(r.leftField)) {
+        throw new AppError('VALIDATION', `Join field "${r.leftField}" was not found on table "${r.leftTable}".`);
+      }
+      if (!fieldSetByTable.get(r.rightTable)?.has(r.rightField)) {
+        throw new AppError('VALIDATION', `Join field "${r.rightField}" was not found on table "${r.rightTable}".`);
+      }
+    }
+
+    const conn: SnowflakeConnectionInfo = {
+      server: auth.host,
+      database: input.database,
+      schema: input.schema,
+      warehouse: input.warehouse,
+      username,
+    };
+    const tableSpecs: SnowflakeTableSpec[] = described.map((d) => ({
+      table: d.table,
+      columns: d.fields.map((f) => ({ name: f.name, sfType: f.type, nillable: f.nillable })),
+    }));
+    const isMulti = described.length > 1;
+    const mode = input.mode ?? 'relationship';
+
+    const hyperName = `federated_${randomBytes(10).toString('hex')}.hyper`;
+    const hyperDbname = `Data/Extracts/${hyperName}`;
+    const extract = isExtract ? { hyperDbname } : undefined;
+
+    let tdsXml: string;
+    if (isMulti) {
+      const relInput = {
+        datasourceName: input.datasourceName,
+        connection: conn,
+        materialization,
+        tables: tableSpecs,
+        relationships,
+        extract,
+      };
+      tdsXml =
+        mode === 'join' ? generateSnowflakePhysicalJoinTds(relInput) : generateSnowflakeRelationshipsTds(relInput);
+    } else {
+      tdsXml = generateSnowflakeTds({
+        datasourceName: input.datasourceName,
+        connection: conn,
+        materialization,
+        table: described[0]!.table,
+        columns: tableSpecs[0]!.columns,
+        extract,
+      });
+    }
+
+    const connectionCredentials = { name: username, password, embed: true as const };
+
+    let published;
+    if (isExtract) {
+      const extractTables: ExtractTable[] = described.map((d) => ({
+        object: snowflakeObjectId(input.database, input.schema, d.table),
+        schema: d.fields.map((f) => ({ name: f.name, type: snowflakeToHyperType(f.type) })) as ExtractColumn[],
+        rows: d.rows,
+      }));
+      const tdsxBuffer = await buildExtractTdsx({ tdsXml, hyperName, tables: extractTables });
+      published = await publishDatasource(getClient(session), {
+        siteId: siteId(session),
+        projectId: project.id,
+        datasourceName: input.datasourceName,
+        tdsxBuffer,
+        overwrite: input.overwrite,
+        connectionCredentials,
+      });
+    } else {
+      published = await publishDatasource(getClient(session), {
+        siteId: siteId(session),
+        projectId: project.id,
+        datasourceName: input.datasourceName,
+        tdsXml,
+        overwrite: input.overwrite,
+        connectionCredentials,
+      });
+    }
+
+    this.setProjectContext(session, { siteId: siteId(session), projectId: project.id, projectName: project.name });
+
+    const ds: TableauDatasource = {
+      id: published.id,
+      name: published.name,
+      contentUrl: published.contentUrl,
+      projectId: published.projectId,
+      projectName: published.projectName,
+    };
+    const lock = this.lockDatasource(session, ds);
+
+    session.flow.connectorMetadata = {
+      ...(session.flow.connectorMetadata ?? {}),
+      [ds.id]: snowflakeTablesToMetadata(ds.id, ds.name, input.database, input.schema, tableSpecs),
+    };
+
+    session.connectors = undefined;
+
+    let refreshNote = '';
+    if (isExtract) {
+      try {
+        const { jobId } = await refreshDatasourceNow(getClient(session), siteId(session), ds.id);
+        refreshNote = jobId
+          ? ` Started a server-side extract refresh (job ${jobId}).`
+          : ' Started a server-side extract refresh.';
+      } catch (err) {
+        log.warn('Could not start Snowflake extract refresh after publish', {
+          datasourceId: ds.id,
+          error: err instanceof AppError ? err.message : String(err),
+        });
+        refreshNote =
+          ' Note: could not start the extract refresh automatically — verify the embedded Snowflake credentials on Tableau Cloud, then use "Refresh Extracts" on the datasource.';
+      }
+    }
+
+    const tableSummary = isMulti ? ` across ${described.length} tables` : '';
+    let message: string;
+    if (isExtract) {
+      const totalRows = described.reduce((sum, d) => sum + d.rows.length, 0);
+      const anyCapped = described.some((d) => d.rows.length >= maxRows);
+      message =
+        `Extract built with ${totalRows.toLocaleString()} row(s)${tableSummary}` +
+        `${anyCapped ? ` (some tables capped at ${maxRows.toLocaleString()})` : ''}.${refreshNote}`;
+    } else {
+      message = `Published a LIVE Snowflake datasource${tableSummary}. Tableau Cloud queries Snowflake directly.`;
     }
     const extractResult: ExtractResult = { state: 'succeeded', message };
     return { datasource: ds, lock, projectContext: session.flow.projectContext!, extract: extractResult };

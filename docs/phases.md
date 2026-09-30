@@ -1,7 +1,7 @@
 # Build Plan (Phases) — TableauPilot AI
 
 > Living document. Update the status + "done" criteria whenever a phase changes. Last
-> updated: 2026-09-13.
+> updated: 2026-09-30.
 
 Status legend: ✅ done · 🚧 in progress · ⬜ not started.
 
@@ -133,6 +133,36 @@ on extract only) → lock + converge on the normal dashboard flow. Single-/multi
 extract builds work; **233 tests** (231 passing in-sandbox; 2 real-Hyper tests need
 `.venv-hyper`); `tsc`/lint clean. **No Salesforce or Excel connector logic changed** (only
 additive code).
+
+## Phase 18 — Salesforce Data Cloud connector: live + extract datasource builder ✅
+**Produces:** `src/datacloud/client.ts` (SOAP login via imported Salesforce.login + CDP token
++ data spaces/objects/query), `src/tableau/authoring/dataCloudTdsGenerator.ts` (single /
+relationships / physical-join `.tds`, live or extract, `class='salesforce-genie'` OAuth
+connection, reconciled with `reference/DataCloud{Live,Extract}DS.tds`),
+`TableauService.{dataCloudConnect,dataCloudListDataSpaces,dataCloudListObjects,dataCloudDescribeObject,buildAndPublishDataCloudDatasource}`,
+`/api/connectors/datacloud/*` routes, `app/components/DataCloudBuild.tsx` + the connector
+dropdown, and `app/api.ts` `dataCloud*` methods.
+**Done when:** SOAP login → pick Data Space → object category → model one/many (relationship or
+join, identical UI) → choose Live or Extract → generate `.tds` (+ `.hyper`/`.tdsx` for extract)
+→ publish (embed Data Cloud OAuth cred; refresh on extract only) → lock + converge on the normal
+dashboard flow. Single-/multi-object + live/extract builds work; **258 tests** (256 passing
+in-sandbox; 2 real-Hyper tests need `.venv-hyper`); `tsc`/lint clean.
+**No Salesforce, Excel, or BigQuery connector logic changed** (only additive code).
+
+## Phase 19 — Snowflake connector: live + extract datasource builder ✅
+**Produces:** `src/snowflake/client.ts` (session login + SHOW/DESCRIBE/SELECT),
+`src/tableau/authoring/snowflakeTdsGenerator.ts` (single / relationships / physical-join
+`.tds`, live or extract, `class='snowflake'` Username Password connection, reconciled with
+`reference/Snowflake{Live,Extract}DS.tds`),
+`TableauService.{snowflakeConnect,snowflakeListWarehouses,snowflakeListDatabases,snowflakeListSchemas,snowflakeListTables,snowflakeDescribeTable,buildAndPublishSnowflakeDatasource}`,
+`/api/connectors/snowflake/*` routes, `app/components/SnowflakeBuild.tsx` + the connector
+dropdown, and `app/api.ts` `snowflake*` methods.
+**Done when:** username/password login → pick Warehouse → Database → Schema → model one/many
+(relationship or join, identical UI) → choose Live or Extract → generate `.tds` (+
+`.hyper`/`.tdsx` for extract) → publish (embed username/password; refresh on extract only) →
+lock + converge on the normal dashboard flow. Single-/multi-table + live/extract builds work;
+**284 tests** (282 passing in-sandbox; 2 real-Hyper tests need unsandboxed Hyper); `tsc`/lint clean.
+**No Salesforce, Excel, BigQuery, or Data Cloud connector logic changed** (only additive code).
 
 ---
 

@@ -1,9 +1,13 @@
 # Authentication
 
+> Living document. Last updated: 2026-09-30.
+
 There are two distinct Tableau authentications, plus the local vault identity — and,
 for the Salesforce connector, a separate Salesforce sign-in (§4). The Excel connector
-requires **no sign-in at all** (§5), and the Google BigQuery connector uses a separate
-Google browser OAuth sign-in (§6).
+requires **no sign-in at all** (§5), the Google BigQuery connector uses a separate
+Google browser OAuth sign-in (§6), and Salesforce Data Cloud reuses Salesforce SOAP
+login then exchanges a CDP token (§7). The Snowflake connector uses username/password
+session login (§8).
 
 ## 1. Local vault identity (username + 6-digit PIN)
 
@@ -86,6 +90,30 @@ Only used by the BigQuery data-source builder; unrelated to Tableau auth above.
 - Both **live and extract** datasources embed the signed-in account's **saved BigQuery OAuth
   credential** on Tableau Cloud (matched by email); Tableau — not this app — refreshes it.
 
+## 7. Salesforce Data Cloud connector sign-in (live or extract datasource builder)
+
+- **Same password login as CRM Salesforce**, then a CDP token exchange. `DataCloudBuild`
+  collects org URL / username / password / optional security token; the server calls
+  unmodified `Salesforce.login` and `POST /services/a360/token`
+  (`grant_type=urn:salesforce:grant-type:external:cdp`). No new env vars and no OAuth popup.
+- The SOAP session + CDP token are **transient and in-memory** (`session.connectors.datacloud`),
+  cleared after publish. Tokens are never logged or persisted.
+- Both **live and extract** datasources embed the publisher's **saved Salesforce Data Cloud
+  OAuth credential** on Tableau Cloud (matched by username); Tableau — not this app — refreshes
+  it. The SOAP password is never what Tableau Cloud uses for live queries or extract refresh.
+
+## 8. Snowflake connector sign-in (live or extract datasource builder)
+
+- **Username/password** against the account host. `SnowflakeBuild` collects server URL /
+  warehouse / username / password; the server calls `POST /session/v1/login-request`
+  (`requestId`, `CLIENT_ENVIRONMENT`, `Accept: application/snowflake`). No new env vars and
+  no OAuth popup. Role UI is omitted (`service=''` in the `.tds`).
+- The session token + password are **transient and in-memory** (`session.connectors.snowflake`),
+  cleared after publish. They are never logged or persisted.
+- Both **live and extract** datasources embed the Snowflake **username/password** on the
+  Tableau Cloud connection at publish time (not a saved OAuth credential). Live runs no
+  refresh; Extract triggers `refreshDatasourceNow` (best-effort).
+
 ## Token boundaries (summary)
 
 | Secret | Where it lives | Ever in browser? | Ever in LLM? |
@@ -99,3 +127,5 @@ Only used by the BigQuery data-source builder; unrelated to Tableau auth above.
 | Salesforce OAuth client secret | server env (if configured) | never | never |
 | Google BigQuery OAuth token | session only (transient, cleared after publish) | never | never |
 | Google OAuth client id/secret | vault (encrypted, if user saves) or server env | never | never |
+| Data Cloud SOAP session + CDP token | session only (transient, cleared after publish) | never | never |
+| Snowflake session token + password | session only (transient, cleared after publish) | never | never |

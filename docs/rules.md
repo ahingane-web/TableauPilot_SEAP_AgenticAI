@@ -1,7 +1,7 @@
 # Engineering & AI Rules — TableauPilot AI
 
 > **Binding** rules for anyone (human or AI) working in this repo. Update this whenever
-> an invariant, convention, or constraint changes. Last updated: 2026-09-29.
+> an invariant, convention, or constraint changes. Last updated: 2026-09-30.
 
 ## 1. Tech to use / avoid
 
@@ -17,8 +17,9 @@
 **Avoid**
 - **No Python except the one sanctioned Hyper sidecar** (`scripts/hyper/build_tdsx.py`,
   used only to materialize the Build-datasource connectors' `.hyper` extracts (Salesforce,
-  Excel, and BigQuery **extract** mode) — the Hyper API has no Node binding). Do not spread
-  Python anywhere else (see [python-dependency-decision.md](./python-dependency-decision.md)).
+  Excel, BigQuery **extract** mode, Data Cloud **extract** mode, and Snowflake **extract**
+  mode) — the Hyper API has no Node binding). Do not spread Python anywhere else (see
+  [python-dependency-decision.md](./python-dependency-decision.md)).
 - **No fake authoring** — do not simulate shelf/mark/filter edits via the Embedding JS
   API; Tableau does not support it (see [authoring-limitations.md](./authoring-limitations.md)).
 - **No heavy/unnecessary dependencies.** Prefer stdlib + the minimal set above.
@@ -43,24 +44,32 @@
 8. **`TableauService`/`TableauClient` is the only HTTP path to Tableau.** No other module
    calls Tableau directly. (Salesforce HTTP — SOAP login, REST describe/query, OAuth —
    is isolated in `src/salesforce/*`; BigQuery HTTP — Google OAuth + BigQuery/Cloud
-   Resource Manager REST — is isolated in `src/bigquery/*`; neither talks to Tableau.)
-9. **Connector source credentials (tokens) are never persisted.** Salesforce creds and the
-   Google BigQuery OAuth **access/refresh token** are held transiently in-memory
-   (`session.connectors.{salesforce,bigquery}` + the short-lived pending-OAuth state) only to
-   read schema/data (and, for extracts, to build the local `.hyper`), then cleared after publish.
+   Resource Manager REST — is isolated in `src/bigquery/*`; Data Cloud HTTP — CDP token
+   exchange, data spaces, metadata, Query API — is isolated in `src/datacloud/*` and
+   **imports** Salesforce `login` without modifying it; Snowflake HTTP — session login +
+   SHOW/DESCRIBE/SELECT — is isolated in `src/snowflake/*`; none of these talk to Tableau.)
+9. **Connector source credentials (tokens) are never persisted.** Salesforce creds, the
+   Google BigQuery OAuth **access/refresh token**, the Data Cloud SOAP session + CDP
+   token, and the Snowflake session token + password are held transiently in-memory
+   (`session.connectors.{salesforce,bigquery,datacloud,snowflake}`
+   + the short-lived pending-OAuth state) only to read schema/data (and, for extracts, to
+   build the local `.hyper`), then cleared after publish.
    The BigQuery OAuth **client** id/secret (the app-registration credential, NOT a user token —
    analogous to the Tableau Connected App secret) may be supplied in the UI and optionally saved
    **encrypted in the user's vault** (`TableauCredentials.bigQueryOAuth`) so it need not be
    re-entered; `GOOGLE_OAUTH_*` is an optional server-wide fallback. The signed-in Google email is
    fetched from OpenID `userinfo` (never asked of the user) and used as the connection username +
-   Tableau saved-credential match. No user secret is ever written to `.env`, the browser, or logs. Published datasources
-   authenticate via the saved OAuth credential on Tableau Cloud (Salesforce OAuth / Google
-   BigQuery OAuth). Multi-object `.tds` field names are qualified/disambiguated so they never
-   collide (`[Object.Field]` for Salesforce/Excel; `Name`/`Name (Table)` for BigQuery, which
-   also keeps the REAL BigQuery column name as `remote-name`).
+   Tableau saved-credential match. No user secret is ever written to `.env`, the browser, or logs.
+   Published Salesforce / BigQuery / Data Cloud datasources authenticate via the saved OAuth
+   credential on Tableau Cloud; Snowflake datasources authenticate via the **embedded username/
+   password** sent at publish (not a saved OAuth credential). Multi-object `.tds` field names are qualified/disambiguated so they never
+   collide (`[Object.Field]` for Salesforce/Excel; `Name`/`Name (Table)` for BigQuery; real API
+   names with `Name (Caption)` collisions for Data Cloud, which also keeps the REAL field API
+   name as `remote-name`; `{TABLE} ({DATABASE}.{TABLE})_{hash}` object-ids and `Name (TABLE)`
+   collisions for Snowflake, which uses `authentication='Username Password'`).
 10. **The conversational copilot stays in scope.** `tableauPilotAgent` only assists with
     this product (Tableau dashboards, the locked datasource/fields, the
-    Salesforce/Excel/BigQuery connector builds, and the app workflow); it politely declines
+    Salesforce/Excel/BigQuery/Data Cloud/Snowflake connector builds, and the app workflow); it politely declines
     and redirects off-topic requests (general knowledge, unrelated code, chit-chat) rather
     than answering them.
 
@@ -121,6 +130,32 @@
   hyper table = the per-table object-id) and, after publish, embeds the Google OAuth credential
   + triggers a refresh (best-effort). Both embed the saved Google BigQuery OAuth credential
   (matched by the signed-in email). Never change Salesforce/Excel datasource logic to add BigQuery.
+- **Salesforce Data Cloud datasources (live or extract):** generate the `.tds` deterministically in
+  `dataCloudTdsGenerator.ts` (a `class='salesforce-genie'` OAuth connection with
+  `dbname='a360/{pod}/{tenantId};{dataSpace}'`, `warehouse` = data space, `server` = `*.c360a.salesforce.com`,
+  `instanceurl` = org URL, and `[public].[apiName]` relations with the friendly caption as the
+  relation name), reconciled 1:1 against `reference/DataCloud{Live,Extract}DS.tds`. **Do not reuse
+  `generateSalesforceTds`** (wrong class, wrong relation, wrong object-id). Column rule is like
+  BigQuery: REAL field API names as `remote-name`; colliding `local-name`s become
+  `ssot__Id__c (Account Contact)`. Object-id is `{caption}_{MD5(apiName)}` (spaces kept).
+  **Live** publishes a bare `.tds` (no `<extract>`, manifest omits `ObjectModelExtractV2`,
+  object-graph `context=''` only) and does not refresh. **Extract** materializes rows into a
+  `.hyper` (Python sidecar, hyper table = that object-id) and, after publish, embeds the saved
+  Salesforce Data Cloud OAuth credential + triggers a refresh (best-effort). Isolation:
+  `src/datacloud/*` + this generator; never change Salesforce/Excel/BigQuery connector logic to
+  add Data Cloud. Nested/complex fields are skipped (scalar columns only).
+- **Snowflake datasources (live or extract):** generate the `.tds` deterministically in
+  `snowflakeTdsGenerator.ts` (a `class='snowflake'` Username Password connection with
+  `server`/`dbname`/`schema`/`warehouse`, and `[DATABASE].[SCHEMA].[TABLE]` relations),
+  reconciled 1:1 against `reference/Snowflake{Live,Extract}DS.tds`. **Do not reuse**
+  `generateSalesforceTds` / BigQuery / Data Cloud generators. Column rule is like BigQuery:
+  REAL names as `remote-name`; colliding `local-name`s become `Region (PEOPLE)`. Object-id is
+  `{TABLE} ({DATABASE}.{TABLE})_{MD5(db.schema.table)}` (stable vs the Hyper table name;
+  Desktop's trailing hash is a different proprietary value). **Live** publishes a bare `.tds`
+  (no `<extract>`, no refresh). **Extract** materializes rows into a `.hyper` (Python sidecar,
+  hyper table = that object-id) and, after publish, embeds username/password and triggers a
+  refresh (best-effort). Isolation: `src/snowflake/*` + this generator; never change
+  Salesforce/Excel/BigQuery/Data Cloud connector logic to add Snowflake.
 
 ## 6. Coding conventions
 
@@ -148,6 +183,7 @@ Verify facts against the code first, and bump each edited doc's `Last updated:` 
 - **phases.md** — build plan + "done" criteria + test count.
 - **memory.md** — append a newest-first progress-log entry (decisions, fixes, status).
 - **README.md** — setup, env vars, run/usage, API surface.
+- **PROJECT_OVERVIEW.md** — plain-language tour (keep in sync with connectors/flows).
 - **security.md**, **authentication.md**, **tableau-api-capabilities.md**,
   **authoring-limitations.md**, **python-dependency-decision.md** — when their topic is
   touched.

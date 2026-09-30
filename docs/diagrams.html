@@ -155,24 +155,34 @@ sequenceDiagram
     </section>
 
     <section id="connector">
-      <h2>3. Connector build flow (Salesforce / Excel)</h2>
-      <p class="sub">Building an extract-backed datasource, then rejoining the dashboard flow above.</p>
+      <h2>3. Connector build flow</h2>
+      <p class="sub">Building a live or extract datasource, then rejoining the dashboard flow above.</p>
       <div class="card">
         <pre class="mermaid">
 flowchart TB
     Start(["Build datasource in SetupPanel"]) --> Pick{"Which connector?"}
     Pick -->|Salesforce| SFconn["connect - list objects"]
     Pick -->|Excel| XLupload["upload .xlsx - parse sheets"]
+    Pick -->|BigQuery| BQoauth["Google OAuth - project / dataset"]
+    Pick -->|Data Cloud| DCconn["SOAP + CDP - data space / objects"]
+    Pick -->|Snowflake| SFwh["session login - warehouse / database / schema"]
     SFconn --> Model["DataModelBuilder - relationships or joins"]
     XLupload --> Model
-    Model --> Tds["Generate .tds (tdsGenerator / excelTdsGenerator)"]
-    Tds --> HyperBuild["Materialize .hyper (Python sidecar)"]
-    HyperBuild --> Publish["Publish .tdsx (publishing/datasource.ts)"]
-    Publish --> Branch{"Connector?"}
-    Branch -->|Salesforce| Cred["Embed saved OAuth credential -> refresh extract"]
-    Branch -->|Excel| Static["Extract-only: no credential, no refresh"]
-    Cred --> Lock["Lock published datasource"]
-    Static --> Lock
+    BQoauth --> Model
+    DCconn --> Model
+    SFwh --> Model
+    Model --> Mat{"Live or Extract?"}
+    Mat -->|Live BQ / DC / Snowflake| LiveTds["Generate bare .tds"]
+    Mat -->|Extract all connectors| ExtTds["Generate .tds + .hyper sidecar"]
+    LiveTds --> PubLive["Publish .tds"]
+    ExtTds --> PubExt["Publish .tdsx"]
+    PubLive --> Cred["Embed connection credential"]
+    PubExt --> Cred
+    Cred --> Refresh{"Extract?"}
+    Refresh -->|yes except Excel| Now["refreshDatasourceNow best-effort"]
+    Refresh -->|Excel / Live| Skip["no refresh"]
+    Now --> Lock["Lock published datasource"]
+    Skip --> Lock
     Lock --> Done(["Continue to dashboard flow"])
         </pre>
       </div>

@@ -31,6 +31,10 @@ import {
   SalesforceBuildSchema,
   ExcelBuildSchema,
   BigQueryBuildSchema,
+  DataCloudBuildSchema,
+  DataCloudObjectCategorySchema,
+  SnowflakeCredentialsSchema,
+  SnowflakeBuildSchema,
   FitModeSchema,
 } from '../schemas/common.js';
 import { ReferenceLineSpecSchema, ColorMapSpecSchema, GrandTotalsSchema } from '../schemas/worksheetSpec.js';
@@ -647,6 +651,226 @@ export function createApp(): Hono {
       dataProjectId: parsed.data.dataProjectId,
       dataProjectName: parsed.data.dataProjectName,
       datasetId: parsed.data.datasetId,
+      tables: parsed.data.tables,
+      relationships: parsed.data.relationships,
+      mode: parsed.data.mode,
+      materialization: parsed.data.materialization,
+      projectId: parsed.data.projectId,
+      datasourceName: parsed.data.datasourceName,
+      overwrite: Boolean(parsed.data.overwrite),
+    });
+    return c.json({
+      datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },
+      extract: { state: result.extract.state, message: result.extract.message },
+      ...contextSnapshot(session),
+    });
+  });
+
+  // ------------------------------------------------------------- Salesforce Data Cloud connector
+  // Additive fourth "Build datasource" entry: SOAP login + CDP token, then Data Space →
+  // object category → model objects → LIVE or EXTRACT datasource. Salesforce/Excel/BigQuery
+  // routes are untouched.
+
+  app.post('/api/connectors/datacloud/connect', async (c) => {
+    const session = requireSession(c);
+    const parsed = SalesforceCredentialsSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new AppError('VALIDATION', 'Salesforce url, username, and password are required.', {
+        details: { issues: zodIssues(parsed.error) },
+      });
+    }
+    await TableauService.dataCloudConnect(session, parsed.data);
+    return c.json({ connected: true });
+  });
+
+  app.get('/api/connectors/datacloud/dataspaces', async (c) => {
+    const session = requireSession(c);
+    const dataSpaces = await TableauService.dataCloudListDataSpaces(session);
+    return c.json({ dataSpaces });
+  });
+
+  app.get('/api/connectors/datacloud/objects', async (c) => {
+    const session = requireSession(c);
+    const dataSpace = String(c.req.query('dataSpace') ?? '').trim();
+    const categoryRaw = String(c.req.query('category') ?? 'all').trim() || 'all';
+    if (!dataSpace) throw new AppError('VALIDATION', 'Provide a Data Cloud dataSpace.');
+    const category = DataCloudObjectCategorySchema.safeParse(categoryRaw);
+    if (!category.success) {
+      throw new AppError('VALIDATION', 'category must be dmo, dlo, ci, or all.');
+    }
+    const objects = await TableauService.dataCloudListObjects(session, dataSpace, category.data);
+    return c.json({ objects: objects.map((o) => ({ name: o.name, label: o.label, category: o.category })) });
+  });
+
+  app.post('/api/connectors/datacloud/describe', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ dataSpace?: string; object?: string }>();
+    const dataSpace = String(body.dataSpace ?? '').trim();
+    const object = String(body.object ?? '').trim();
+    if (!dataSpace || !object) {
+      throw new AppError('VALIDATION', 'Provide a Data Cloud dataSpace and object to describe.');
+    }
+    const fields = await TableauService.dataCloudDescribeObject(session, dataSpace, object);
+    return c.json({ fields });
+  });
+
+  app.post('/api/connectors/datacloud/publish', async (c) => {
+    const session = requireSession(c);
+    const raw = await c.req.json<{
+      credentials?: unknown;
+      dataSpace?: string;
+      category?: unknown;
+      tables?: unknown;
+      relationships?: unknown;
+      mode?: unknown;
+      materialization?: unknown;
+      projectId?: string;
+      datasourceName?: string;
+      overwrite?: boolean;
+    }>();
+    const parsed = DataCloudBuildSchema.safeParse({
+      credentials: raw.credentials,
+      dataSpace: raw.dataSpace,
+      category: raw.category,
+      tables: Array.isArray(raw.tables) ? raw.tables : [],
+      relationships: Array.isArray(raw.relationships) ? raw.relationships : [],
+      ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+      ...(raw.materialization !== undefined ? { materialization: raw.materialization } : {}),
+      projectId: raw.projectId,
+      datasourceName: raw.datasourceName,
+      overwrite: raw.overwrite,
+    });
+    if (!parsed.success) {
+      throw new AppError(
+        'VALIDATION',
+        'Invalid Data Cloud datasource request. Check the connection, data space, objects, relationships, project, and name.',
+        { details: { issues: zodIssues(parsed.error) } },
+      );
+    }
+    const result = await TableauService.buildAndPublishDataCloudDatasource(session, {
+      credentials: parsed.data.credentials,
+      dataSpace: parsed.data.dataSpace,
+      category: parsed.data.category,
+      tables: parsed.data.tables,
+      relationships: parsed.data.relationships,
+      mode: parsed.data.mode,
+      materialization: parsed.data.materialization,
+      projectId: parsed.data.projectId,
+      datasourceName: parsed.data.datasourceName,
+      overwrite: Boolean(parsed.data.overwrite),
+    });
+    return c.json({
+      datasource: { id: result.datasource.id, name: result.datasource.name, projectName: result.datasource.projectName },
+      extract: { state: result.extract.state, message: result.extract.message },
+      ...contextSnapshot(session),
+    });
+  });
+
+  // ------------------------------------------------------------- Snowflake connector
+  // Additive fifth "Build datasource" entry: username/password session login, then
+  // Warehouse → Database → Schema → tables → LIVE or EXTRACT. Other connectors untouched.
+
+  app.post('/api/connectors/snowflake/connect', async (c) => {
+    const session = requireSession(c);
+    const parsed = SnowflakeCredentialsSchema.safeParse(await c.req.json());
+    if (!parsed.success) {
+      throw new AppError('VALIDATION', 'Snowflake server URL, warehouse, username, and password are required.', {
+        details: { issues: zodIssues(parsed.error) },
+      });
+    }
+    const result = await TableauService.snowflakeConnect(session, parsed.data);
+    return c.json(result);
+  });
+
+  app.get('/api/connectors/snowflake/warehouses', async (c) => {
+    const session = requireSession(c);
+    const warehouses = await TableauService.snowflakeListWarehouses(session);
+    return c.json({ warehouses });
+  });
+
+  app.get('/api/connectors/snowflake/databases', async (c) => {
+    const session = requireSession(c);
+    const warehouse = String(c.req.query('warehouse') ?? '').trim();
+    if (!warehouse) throw new AppError('VALIDATION', 'Provide a Snowflake warehouse.');
+    const databases = await TableauService.snowflakeListDatabases(session, warehouse);
+    return c.json({ databases });
+  });
+
+  app.get('/api/connectors/snowflake/schemas', async (c) => {
+    const session = requireSession(c);
+    const warehouse = String(c.req.query('warehouse') ?? '').trim();
+    const database = String(c.req.query('database') ?? '').trim();
+    if (!warehouse || !database) throw new AppError('VALIDATION', 'Provide a Snowflake warehouse and database.');
+    const schemas = await TableauService.snowflakeListSchemas(session, warehouse, database);
+    return c.json({ schemas });
+  });
+
+  app.get('/api/connectors/snowflake/tables', async (c) => {
+    const session = requireSession(c);
+    const warehouse = String(c.req.query('warehouse') ?? '').trim();
+    const database = String(c.req.query('database') ?? '').trim();
+    const schema = String(c.req.query('schema') ?? '').trim();
+    if (!warehouse || !database || !schema) {
+      throw new AppError('VALIDATION', 'Provide a Snowflake warehouse, database, and schema.');
+    }
+    const tables = await TableauService.snowflakeListTables(session, warehouse, database, schema);
+    return c.json({ tables });
+  });
+
+  app.post('/api/connectors/snowflake/describe', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ warehouse?: string; database?: string; schema?: string; table?: string }>();
+    const warehouse = String(body.warehouse ?? '').trim();
+    const database = String(body.database ?? '').trim();
+    const schema = String(body.schema ?? '').trim();
+    const table = String(body.table ?? '').trim();
+    if (!warehouse || !database || !schema || !table) {
+      throw new AppError('VALIDATION', 'Provide a Snowflake warehouse, database, schema, and table to describe.');
+    }
+    const fields = await TableauService.snowflakeDescribeTable(session, warehouse, database, schema, table);
+    return c.json({ fields });
+  });
+
+  app.post('/api/connectors/snowflake/publish', async (c) => {
+    const session = requireSession(c);
+    const raw = await c.req.json<{
+      credentials?: unknown;
+      warehouse?: string;
+      database?: string;
+      schema?: string;
+      tables?: unknown;
+      relationships?: unknown;
+      mode?: unknown;
+      materialization?: unknown;
+      projectId?: string;
+      datasourceName?: string;
+      overwrite?: boolean;
+    }>();
+    const parsed = SnowflakeBuildSchema.safeParse({
+      credentials: raw.credentials,
+      warehouse: raw.warehouse,
+      database: raw.database,
+      schema: raw.schema,
+      tables: Array.isArray(raw.tables) ? raw.tables : [],
+      relationships: Array.isArray(raw.relationships) ? raw.relationships : [],
+      ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
+      ...(raw.materialization !== undefined ? { materialization: raw.materialization } : {}),
+      projectId: raw.projectId,
+      datasourceName: raw.datasourceName,
+      overwrite: raw.overwrite,
+    });
+    if (!parsed.success) {
+      throw new AppError(
+        'VALIDATION',
+        'Invalid Snowflake datasource request. Check the connection, warehouse, database, schema, tables, relationships, project, and name.',
+        { details: { issues: zodIssues(parsed.error) } },
+      );
+    }
+    const result = await TableauService.buildAndPublishSnowflakeDatasource(session, {
+      credentials: parsed.data.credentials,
+      warehouse: parsed.data.warehouse,
+      database: parsed.data.database,
+      schema: parsed.data.schema,
       tables: parsed.data.tables,
       relationships: parsed.data.relationships,
       mode: parsed.data.mode,
