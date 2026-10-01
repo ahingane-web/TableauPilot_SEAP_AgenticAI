@@ -96,6 +96,24 @@ export const api = {
     req<{ credentialSummary: CredentialSummary | null }>('/api/vault/credentials'),
   updateCredentials: (body: unknown) =>
     req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/credentials/update', { method: 'POST', body }),
+  deleteCredentials: (body: { pin: string }) =>
+    req<SessionContext & { deleted: true }>('/api/vault/credentials/delete', { method: 'POST', body }),
+  saveSalesforceAccount: (body: unknown) =>
+    req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/connectors/salesforce', { method: 'POST', body }),
+  deleteSalesforceAccount: (body: { pin: string }) =>
+    req<{ deleted: true; credentialSummary: CredentialSummary }>('/api/vault/connectors/salesforce/delete', { method: 'POST', body }),
+  saveDataCloudAccount: (body: unknown) =>
+    req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/connectors/datacloud', { method: 'POST', body }),
+  deleteDataCloudAccount: (body: { pin: string }) =>
+    req<{ deleted: true; credentialSummary: CredentialSummary }>('/api/vault/connectors/datacloud/delete', { method: 'POST', body }),
+  saveSnowflakeAccount: (body: unknown) =>
+    req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/connectors/snowflake', { method: 'POST', body }),
+  deleteSnowflakeAccount: (body: { pin: string }) =>
+    req<{ deleted: true; credentialSummary: CredentialSummary }>('/api/vault/connectors/snowflake/delete', { method: 'POST', body }),
+  saveBigQueryAccount: (body: unknown) =>
+    req<{ saved: boolean; credentialSummary: CredentialSummary }>('/api/vault/connectors/bigquery', { method: 'POST', body }),
+  deleteBigQueryAccount: (body: { pin: string }) =>
+    req<{ deleted: true; credentialSummary: CredentialSummary }>('/api/vault/connectors/bigquery/delete', { method: 'POST', body }),
 
   connect: () => req<{ connected: boolean; siteContentUrl: string; userId: string }>('/api/tableau/connect', { method: 'POST' }),
   projects: () => req<{ items: NamedItem[] }>('/api/tableau/projects'),
@@ -122,7 +140,7 @@ export const api = {
     req<{ items: { id: string; label: string; oauthRedirectUri?: string; oauthConfigured?: boolean }[] }>(
       '/api/connectors',
     ),
-  salesforceConnect: (creds: { url: string; username: string; password: string; token?: string }) =>
+  salesforceConnect: (creds: { url?: string; username?: string; password?: string; token?: string } = {}) =>
     req<{ tables: { name: string; label: string }[] }>('/api/connectors/salesforce/connect', { method: 'POST', body: creds }),
   // Interactive OAuth (browser sign-in): start returns the authorize URL to open in a popup.
   salesforceOauthStart: (body: { url: string; clientId?: string; clientSecret?: string }) =>
@@ -139,7 +157,7 @@ export const api = {
   // relationships). Credentials are used only to read the object schema (describe);
   // publishing uses the SAVED Salesforce OAuth credential on Tableau Cloud.
   salesforcePublish: (body: {
-    credentials: { url: string; username: string; password: string; token?: string };
+    credentials?: { url?: string; username?: string; password?: string; token?: string };
     /** One object = single-table; multiple = relationships datasource. */
     tables: string[];
     relationships?: Array<{
@@ -280,7 +298,9 @@ export const api = {
     >('/api/connectors/bigquery/publish', { method: 'POST', body }),
 
   // ---- Salesforce Data Cloud connector ----
-  dataCloudConnect: (creds: { url: string; username: string; password: string; token?: string }) =>
+  dataCloudOauthStart: (body: { url?: string; clientId?: string; clientSecret?: string } = {}) =>
+    req<{ authUrl: string; redirectUri: string }>('/api/connectors/datacloud/oauth/start', { method: 'POST', body }),
+  dataCloudConnect: (creds: { url?: string; username?: string; password?: string; token?: string } = {}) =>
     req<{ connected: true }>('/api/connectors/datacloud/connect', { method: 'POST', body: creds }),
   dataCloudDataSpaces: () =>
     req<{ dataSpaces: { name: string; label: string }[] }>('/api/connectors/datacloud/dataspaces'),
@@ -294,7 +314,7 @@ export const api = {
       body: { dataSpace, object },
     }),
   dataCloudPublish: (body: {
-    credentials: { url: string; username: string; password: string; token?: string };
+    credentials?: { url?: string; username?: string; password?: string; token?: string };
     dataSpace: string;
     category?: 'dmo' | 'dlo' | 'ci' | 'all';
     tables: string[];
@@ -320,7 +340,7 @@ export const api = {
     >('/api/connectors/datacloud/publish', { method: 'POST', body }),
 
   // ---- Snowflake connector ----
-  snowflakeConnect: (creds: { url: string; warehouse: string; username: string; password: string }) =>
+  snowflakeConnect: (creds: { url?: string; warehouse?: string; username?: string; password?: string } = {}) =>
     req<{ connected: true; warehouse: string; host: string }>('/api/connectors/snowflake/connect', {
       method: 'POST',
       body: creds,
@@ -345,7 +365,7 @@ export const api = {
       body: { warehouse, database, schema, table },
     }),
   snowflakePublish: (body: {
-    credentials: { url: string; warehouse: string; username: string; password: string };
+    credentials?: { url?: string; warehouse?: string; username?: string; password?: string };
     warehouse: string;
     database: string;
     schema: string;

@@ -1,6 +1,6 @@
 # Python Dependency Decision — scoped to extract building
 
-> Living document. Last updated: 2026-09-30.
+> Living document. Last updated: 2026-10-01.
 
 **Decision: TableauPilot is TypeScript / Node.js, with ONE narrow exception — a Python
 Hyper API sidecar used solely to materialize `.hyper` extracts for the Build-datasource

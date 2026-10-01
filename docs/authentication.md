@@ -1,13 +1,13 @@
 # Authentication
 
-> Living document. Last updated: 2026-09-30.
+> Living document. Last updated: 2026-10-01.
 
 There are two distinct Tableau authentications, plus the local vault identity — and,
 for the Salesforce connector, a separate Salesforce sign-in (§4). The Excel connector
 requires **no sign-in at all** (§5), the Google BigQuery connector uses a separate
-Google browser OAuth sign-in (§6), and Salesforce Data Cloud reuses Salesforce SOAP
-login then exchanges a CDP token (§7). The Snowflake connector uses username/password
-session login (§8).
+Google browser OAuth sign-in (§6), and Salesforce Data Cloud uses Salesforce browser
+OAuth with CDP scopes then exchanges a CDP token (§7; SOAP password login is a fallback).
+The Snowflake connector uses username/password session login (§8).
 
 ## 1. Local vault identity (username + 6-digit PIN)
 
@@ -16,6 +16,16 @@ credential. See [security.md](./security.md) for the crypto.
 
 - **Register:** new username + PIN → creates an encrypted vault record.
 - **Unlock:** existing username + PIN → decrypts credentials into an in-memory session.
+- **Edit / delete:** PIN-gated even inside an unlocked session. Tableau
+  (`POST /api/vault/credentials/update` and `/delete`) and per-connector sections
+  (`POST /api/vault/connectors/{salesforce,bigquery,datacloud,snowflake}` + `/delete`).
+  Tableau delete clears the whole encrypted blob; section delete clears only that login.
+  The left-top **Vault** panel keeps Tableau save/edit/delete. Connector logins are
+  entered on the Build connect forms (**Save Creds in Vault** / **Use Saved Creds**);
+  Vault shows compact non-secret summaries and PIN delete. **Show Vault** / **Hide Vault**
+  sits in the Vault header (body hidden by default after Tableau credentials are saved;
+  auto-opens if they are not). Setup/Plan stay if Tableau credentials are saved. Secrets are
+  never returned to the browser.
 
 ## 2. Tableau REST — Personal Access Token (PAT)
 
@@ -48,6 +58,9 @@ Only used by the Salesforce data-source builder; unrelated to Tableau auth above
 - **Username / password (+ optional security token).** SOAP login (`src/salesforce/
   client.ts` `login()`) returns a session used for REST `describe`/`query`. After login,
   `resolveLatestApiVersion()` picks the org's highest available REST API version.
+  The connect form is always visible. **Save Creds in Vault** stores login materials
+  (not the SOAP session). **Use Saved Creds** prefills URL/username and connects with
+  an empty body so the route merges vault secrets — passwords never return to the browser.
 - **Browser OAuth (PKCE) — optional.** With `SALESFORCE_OAUTH_CLIENT_ID` (+ secret)
   configured, the user signs in via Salesforce; `src/salesforce/oauth.ts` runs the
   PKCE authorize → token-exchange → userinfo flow (`/api/connectors/salesforce/oauth/*`).
@@ -79,11 +92,12 @@ Only used by the BigQuery data-source builder; unrelated to Tableau auth above.
   the client id/secret in priority order: **per-request (UI-entered) → the user's vault-saved
   client (`TableauCredentials.bigQueryOAuth`) → `GOOGLE_OAUTH_*`**. `/api/connectors` reports
   `oauthConfigured`; when the server has no env client, `BigQueryBuild` collects the **Client ID
-  (+ optional secret) in the UI** (with an in-UI how-to for creating one) and can **save it
-  encrypted in the user's vault** via `POST /api/connectors/bigquery/oauth/client` so it is
-  prefilled next time. The vault stores only this reusable app-registration credential; the
-  per-user access/refresh token is still transient (`session.connectors.bigquery`), never
-  persisted or logged. The connection **email is never asked** — it is read from `userinfo`.
+  (+ optional secret) on the Sign-in step** (with an in-UI how-to for creating one). **Save Creds
+  in Vault** stores the client only (not the Google access token). **Use Saved Creds** prefills
+  the client id and starts OAuth with an empty body so the route merges the vault client.
+  The vault stores only this reusable app-registration credential; the per-user access/refresh
+  token is still transient (`session.connectors.bigquery`), never persisted or logged. The
+  connection **email is never asked** — it is read from `userinfo`.
 - The Google access/refresh token and email are **transient and in-memory**
   (`session.connectors.bigquery`), cleared after publish; the pending-OAuth PKCE state lives
   only in `src/bigquery/oauthStore.ts` with a short TTL. Tokens are never logged or persisted.
@@ -92,11 +106,19 @@ Only used by the BigQuery data-source builder; unrelated to Tableau auth above.
 
 ## 7. Salesforce Data Cloud connector sign-in (live or extract datasource builder)
 
-- **Same password login as CRM Salesforce**, then a CDP token exchange. `DataCloudBuild`
-  collects org URL / username / password / optional security token; the server calls
-  unmodified `Salesforce.login` and `POST /services/a360/token`
-  (`grant_type=urn:salesforce:grant-type:external:cdp`). No new env vars and no OAuth popup.
-- The SOAP session + CDP token are **transient and in-memory** (`session.connectors.datacloud`),
+- **Browser OAuth with CDP scopes** (`api cdp_query_api`). `DataCloudBuild` opens a Salesforce
+  popup (`display=popup`, no `prompt=login`); `src/datacloud/oauth.ts` builds the authorize URL
+  (Salesforce `oauth.ts` internals unchanged). The My Domain URL field starts empty (tooltip
+  only — no default host); a BigQuery-style collapsible how-to covers Connected App setup,
+  scopes, callback URL, and `OAUTH_APPROVAL_ERROR_GENERIC`. The access token is exchanged at `POST /services/a360/token`
+  (`grant_type=urn:salesforce:grant-type:external:cdp`). Consumer Key/Secret are pasted in
+  the UI (or `SALESFORCE_OAUTH_*`). The callback URI is the **same** Salesforce CRM
+  callback (`SALESFORCE_OAUTH_REDIRECT_URI`); the shared handler tries the Data Cloud
+  pending store first. SOAP username/password remains as a fallback — SOAP session ids
+  often fail a360 with HTTP 500. Login fields stay visible. **Save Creds in Vault** stores
+  My Domain + Connected App (optional SOAP). **Use Saved Creds** prefills non-secret
+  fields and starts OAuth with an empty body so the route merges vault secrets.
+- The OAuth or SOAP session + CDP token are **transient and in-memory** (`session.connectors.datacloud`),
   cleared after publish. Tokens are never logged or persisted.
 - Both **live and extract** datasources embed the publisher's **saved Salesforce Data Cloud
   OAuth credential** on Tableau Cloud (matched by username); Tableau — not this app — refreshes
@@ -107,7 +129,10 @@ Only used by the BigQuery data-source builder; unrelated to Tableau auth above.
 - **Username/password** against the account host. `SnowflakeBuild` collects server URL /
   warehouse / username / password; the server calls `POST /session/v1/login-request`
   (`requestId`, `CLIENT_ENVIRONMENT`, `Accept: application/snowflake`). No new env vars and
-  no OAuth popup. Role UI is omitted (`service=''` in the `.tds`).
+  no OAuth popup. Role UI is omitted (`service=''` in the `.tds`). Login fields stay
+  visible. **Save Creds in Vault** stores login materials. **Use Saved Creds** prefills
+  server/warehouse/username and connects with an empty body so the route merges the vault
+  password.
 - The session token + password are **transient and in-memory** (`session.connectors.snowflake`),
   cleared after publish. They are never logged or persisted.
 - Both **live and extract** datasources embed the Snowflake **username/password** on the
@@ -123,9 +148,10 @@ Only used by the BigQuery data-source builder; unrelated to Tableau auth above.
 | REST auth token | session (server) | never | never |
 | Connected App secret | vault + session (server) | never | never |
 | Minted embed JWT | server → browser (short-lived) | yes (by design) | never |
-| Salesforce creds / OAuth token | session only (transient, cleared after publish) | never | never |
+| Salesforce SOAP/OAuth session | session only (transient, cleared after publish) | never | never |
+| Salesforce / Data Cloud / Snowflake login materials | vault + session | never returned | never |
 | Salesforce OAuth client secret | server env (if configured) | never | never |
 | Google BigQuery OAuth token | session only (transient, cleared after publish) | never | never |
 | Google OAuth client id/secret | vault (encrypted, if user saves) or server env | never | never |
-| Data Cloud SOAP session + CDP token | session only (transient, cleared after publish) | never | never |
+| Data Cloud OAuth / SOAP session + CDP token | session only (transient, cleared after publish) | never | never |
 | Snowflake session token + password | session only (transient, cleared after publish) | never | never |

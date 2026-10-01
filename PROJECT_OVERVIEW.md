@@ -2,7 +2,7 @@
 
 > A plain-language onboarding guide that ties together the README and the `docs/*`
 > set. For binding invariants and deep detail, always defer to the authoritative docs
-> linked at the bottom. Last updated: 2026-09-30.
+> linked at the bottom. Last updated: 2026-10-01.
 
 ## What this project is
 
@@ -58,9 +58,15 @@ Browser SPA (React/Vite)                 Node server (Hono BFF)                E
 ### 1. Create a dashboard (the core flow)
 
 1. **Vault** — register username + 6-digit PIN, save Tableau credentials (cloud URL,
-   site, PAT, optional Connected App). Later, unlock with the PIN.
-2. **Connect & lock** — connect to Tableau Cloud, choose the target project, and **lock**
-   a published datasource as the session's single source of truth.
+   site, PAT, optional Connected App) in the left-top **Vault**. After they are saved,
+   the Vault body is **hidden by default**; **Show Vault** / **Hide Vault** sits on the
+   right of the Vault header. Connector logins are saved from the Build **connect forms**
+   (**Save Creds in Vault** / **Use Saved Creds**), not by re-typing passwords in Vault.
+   Later, unlock with the PIN.
+2. **Connect & lock** — connect to Tableau Cloud, choose the **target project (folder)**,
+   then **Use Published datasource** (only datasources in that folder) or **Build
+   datasource** (pick a connector; default is **Select the connector**), then **lock**
+   as the session's single source of truth.
 3. **Plan -> approve -> execute** — describe the dashboard; the agent inspects the locked
    datasource's real fields and returns a Zod-validated `DashboardPlan`. You approve; the
    server generates the `.twb`, publishes it to the approved project, and verifies it.
@@ -70,7 +76,8 @@ Browser SPA (React/Vite)                 Node server (Hono BFF)                E
 
 ### 2. Build a datasource (connectors)
 
-- **Salesforce** — connect (username/password or OAuth), pick one or more objects, model
+- **Salesforce** — connect (username/password or OAuth; **Save Creds in Vault** /
+  **Use Saved Creds**), pick one or more objects, model
   them (Relationship or Join), publish. Rows are queried and materialized into a local
   `.hyper`, published, the saved Salesforce OAuth credential is embedded, and an extract
   refresh is triggered.
@@ -82,15 +89,18 @@ Browser SPA (React/Vite)                 Node server (Hono BFF)                E
   Relationship/Join modeling. Choose **Live** (Tableau queries BigQuery directly over OAuth)
   or **Extract** (rows queried into a local `.hyper`, refreshed on Cloud). Both embed the
   publisher's saved Google BigQuery OAuth credential. The OAuth **client** id/secret is entered
-  in the UI and can be saved encrypted in the user's vault (env `GOOGLE_OAUTH_*` is an optional
+  in the UI (Sign-in step) and can be stored with **Save Creds in Vault** (env `GOOGLE_OAUTH_*` is an optional
   fallback); the email is read from `userinfo`, never asked.
-- **Salesforce Data Cloud** — sign in with the **same username/password form** as Salesforce,
-  pick a Data Space and object type (DMO / DLO / Calculated Insights / All), and each **object**
+- **Salesforce Data Cloud** — **sign in with Salesforce** (paste **My Domain** URL, then browser
+  OAuth with CDP scopes; Connected App setup is a collapsible how-to like BigQuery). **Save Creds
+  in Vault** / **Use Saved Creds** sit next to Sign in. SOAP
+  username/password is a fallback (often fails Data Cloud token exchange). Pick a Data Space
+  and object type (DMO / DLO / Calculated Insights / All), and each **object**
   becomes an entity for the same Relationship/Join modeling. Choose **Live** (Tableau queries
   Data Cloud directly over OAuth) or **Extract** (rows queried into a local `.hyper`, refreshed
   on Cloud). Both embed the publisher's saved Salesforce Data Cloud OAuth credential.
 - **Snowflake** — sign in with **username/password** (server URL / warehouse / username /
-  password), pick Warehouse → Database → Schema, and each **table** becomes an entity for
+  password; **Save Creds in Vault** / **Use Saved Creds** on that form), pick Warehouse → Database → Schema, and each **table** becomes an entity for
   the same Relationship/Join modeling. Choose **Live** (Tableau queries Snowflake directly)
   or **Extract** (rows queried into a local `.hyper`, refreshed on Cloud). Both embed the
   Snowflake username/password on the Tableau Cloud connection (not OAuth).
@@ -126,7 +136,7 @@ sequenceDiagram
     SPA->>BFF: POST /api/tableau/connect
     BFF->>Tableau: REST sign-in with PAT
     SPA->>BFF: GET /api/tableau/projects and datasources
-    User->>SPA: Pick target project + datasource
+    User->>SPA: Pick target project folder, then published DS in that folder or Build
     SPA->>BFF: POST /api/tableau/select-project and lock-datasource
     BFF->>Tableau: Fetch datasource metadata (real fields)
     BFF-->>SPA: Locked datasource + field list
@@ -160,14 +170,19 @@ sequenceDiagram
 
 Step-by-step, tied to the code:
 
-1. **Unlock the vault** (`app/components/CredentialsPanel.tsx` -> `POST /api/vault/unlock`).
+1. **Unlock the vault** (`app/components/ConnectionPanel.tsx` → `POST /api/vault/unlock`).
    The PIN derives the AES key (`src/vault`), decrypts your Tableau credentials into an
-   in-memory session, and returns only an opaque `sessionId`.
+   in-memory session, and returns only an opaque `sessionId`. The left-top **Vault**
+   header (`CredentialsPanel.tsx`) stays mounted with **Show Vault** / **Hide Vault**
+   (body hidden by default after Tableau credentials exist). Tableau save / PIN-gated
+   edit / PIN-gated delete live there; connector summaries are compact (PIN delete only).
 2. **Connect to Tableau** (`SetupPanel.tsx` -> `POST /api/tableau/connect`). The server
    signs in to the REST API with your PAT (`src/tableau/auth`), caching the token
    server-side.
-3. **Choose + lock a datasource** (`select-project`, `lock-datasource`). The locked
-   datasource becomes the session's single source of truth; its real fields are fetched
+3. **Choose + lock a datasource** (`select-project`, `lock-datasource`). Pick a **target
+   project (folder)** first. **Use Published datasource** lists only datasources in that
+   folder; **Build datasource** starts at **Select the connector**. The locked datasource
+   becomes the session's single source of truth; its real fields are fetched
    via the Metadata API (`src/tableau/datasources`, `discovery`) so the AI only ever plans
    against fields that actually exist.
 4. **Plan** (`PlanPanel.tsx` -> `POST /api/dashboard/plan`). The `dashboardPlannerAgent`
@@ -192,12 +207,15 @@ Step-by-step, tied to the code:
 When you instead choose **Build datasource** in `SetupPanel.tsx`:
 
 1. **Connect / upload / sign in** — Salesforce: `POST /api/connectors/salesforce/connect`
-   logs in and lists objects; Excel: `POST /api/connectors/excel/upload` parses the workbook
-   (`src/excel/excelClient.ts`) into sheets; BigQuery: browser Google OAuth
-   (`/api/connectors/bigquery/oauth/*`, `src/bigquery/*`) then list projects/datasets/tables;
-   Data Cloud: SOAP login + CDP token (`/api/connectors/datacloud/*`, `src/datacloud/*`) then
-   list data spaces/objects; Snowflake: session login (`/api/connectors/snowflake/*`,
-   `src/snowflake/*`) then list warehouses/databases/schemas/tables. State is transient on
+   logs in and lists objects (**Save Creds in Vault** / **Use Saved Creds** on the form);
+   Excel: `POST /api/connectors/excel/upload` parses the workbook
+   (`src/excel/excelClient.ts`) into sheets (no vault buttons); BigQuery: browser Google OAuth
+   (`/api/connectors/bigquery/oauth/*`, `src/bigquery/*`) then list projects/datasets/tables
+   (OAuth client fields on Sign in; **Save Creds in Vault** stores the client only);
+   Data Cloud: Salesforce OAuth with CDP scopes (`/api/connectors/datacloud/oauth/start`,
+   `src/datacloud/*`) then list data spaces/objects; Snowflake: session login (`/api/connectors/snowflake/*`,
+   `src/snowflake/*`) then list warehouses/databases/schemas/tables. Empty/partial connect
+   bodies merge vault secrets server-side. State is transient on
    the session.
 2. **Model** — the shared `DataModelBuilder.tsx` lets you add tables/sheets and define
    relationships or physical joins; join fields come from `describe` calls.
@@ -236,12 +254,14 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
 ## Repository layout (high level)
 
 - `app/` — React SPA (`components/`, `api.ts`, `types.ts`).
-  - `components/SetupPanel.tsx` — connect, pick project, lock datasource, and the "Build
-    datasource" connector switch (the Salesforce sub-flow lives inline here).
+  - `App.tsx` — `showVault` (default hidden after Tableau credentials exist; header **Show Vault**).
+  - `components/CredentialsPanel.tsx` — Vault: Tableau save/edit/delete + compact connector summaries.
+  - `components/SetupPanel.tsx` — connect, pick project, **Use Published datasource** (folder-filtered)
+    or **Build datasource** (connector switch; Salesforce sub-flow lives inline here).
   - `components/DataModelBuilder.tsx` — shared relationship/join modeling UI.
   - `components/ExcelBuild.tsx` — the Excel connector sub-flow.
   - `components/BigQueryBuild.tsx` — the Google BigQuery connector sub-flow (OAuth, Live/Extract).
-  - `components/DataCloudBuild.tsx` — the Salesforce Data Cloud connector sub-flow (SOAP login, Live/Extract).
+  - `components/DataCloudBuild.tsx` — the Salesforce Data Cloud connector sub-flow (OAuth sign-in, Live/Extract).
   - `components/SnowflakeBuild.tsx` — the Snowflake connector sub-flow (username/password, Warehouse → Database → Schema, Live/Extract).
 - `src/server/` — Hono app (`app.ts` routes, `index.ts` bootstrap).
 - `src/agents/` — Mastra agents (`tableauPilotAgent`, `dashboardPlannerAgent`,
@@ -261,7 +281,7 @@ When you instead choose **Build datasource** in `SetupPanel.tsx`:
 - `src/salesforce/` — Salesforce client + OAuth (`client.ts`, `oauth.ts`, `oauthStore.ts`).
 - `src/excel/` — `excelClient.ts` (workbook parsing).
 - `src/bigquery/` — BigQuery client + Google OAuth (`client.ts`, `oauth.ts`, `oauthStore.ts`).
-- `src/datacloud/` — Data Cloud client (`client.ts`; imports Salesforce SOAP `login`).
+- `src/datacloud/` — Data Cloud client (`client.ts`; OAuth wrapper + SOAP `login` import), `oauth.ts`, `oauthStore.ts`.
 - `src/snowflake/` — Snowflake client (`client.ts`; session login + SHOW/DESCRIBE/SELECT).
 - `src/vault/` — PIN-encrypted credential vault, sessions, crypto.
 - `src/schemas/` — Zod schemas (`common.ts` holds connector build/relationship schemas).
@@ -277,7 +297,7 @@ a server-only `VAULT_PEPPER` + per-user salt) that encrypts credentials at rest.
 unlock, decrypted secrets live only in an in-memory session keyed by an opaque
 `sessionId`; the browser holds only that id. Logs, traces, LLM inputs, and tool outputs
 are redacted/sanitized so tokens never leak. Connector source credentials/tokens
-(Salesforce creds, the Google BigQuery OAuth token, Data Cloud SOAP/CDP tokens, Snowflake session token + password) are transient and cleared after publish;
+(Salesforce creds, the Google BigQuery OAuth token, Data Cloud OAuth/SOAP + CDP tokens, Snowflake session token + password) are transient and cleared after publish;
 published datasources rely on Tableau Cloud's saved credentials, not secrets this app stores.
 (The BigQuery OAuth *client* id/secret — an app-registration credential, not a user token — may
 optionally be saved encrypted in the user's vault so it need not be re-entered.) Full detail:

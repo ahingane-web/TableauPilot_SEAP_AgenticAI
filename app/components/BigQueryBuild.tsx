@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
-import type { NamedItem } from '../types';
+import type { CredentialSummary, NamedItem } from '../types';
 import { Busy } from './common';
 import { DataModelBuilder, type DataModel } from './DataModelBuilder';
 
@@ -27,6 +27,8 @@ export function BigQueryBuild({
   setBusy,
   projects,
   onPublished,
+  vaultSummary,
+  onVaultSaved,
 }: {
   busy: string | null;
   setBusy: (v: string | null) => void;
@@ -36,6 +38,8 @@ export function BigQueryBuild({
     datasource: { name: string };
     extract?: { state?: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
   }) => Promise<void>;
+  vaultSummary: CredentialSummary | null;
+  onVaultSaved: () => Promise<void>;
 }): React.ReactElement {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -52,7 +56,8 @@ export function BigQueryBuild({
   // Vault persistence of the OAuth client (so the user doesn't re-enter it every session).
   const [savedInVault, setSavedInVault] = useState(false);
   const [secretSaved, setSecretSaved] = useState(false);
-  const [saveToVault, setSaveToVault] = useState(true);
+  const [savingVault, setSavingVault] = useState(false);
+  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
 
   const [bqProjects, setBqProjects] = useState<BqProject[]>([]);
@@ -160,32 +165,66 @@ export function BigQueryBuild({
     return () => window.removeEventListener('message', onMessage);
   }, []);
 
-  // When the server has no configured client, the user must supply a Client ID here.
+  // When the server has no configured client, the user supplies a Client ID here.
+  const vaultSaved = Boolean(vaultSummary?.hasBigQueryOAuth || savedInVault);
   const needsClient = oauthConfigured === false;
-  const canSignIn = !connecting && (!needsClient || Boolean(clientId.trim()));
+  const canSignIn = !connecting && (!needsClient || Boolean(clientId.trim()) || vaultSaved);
 
   async function signIn(): Promise<void> {
     if (!canSignIn) return;
     setConnecting(true);
     setConnectError(null);
+    setVaultNotice(null);
     try {
-      // Persist the client to the vault first (best-effort) so it's remembered next time.
-      if (needsClient && saveToVault && clientId.trim()) {
-        try {
-          const saved = await api.bigQueryOAuthClientSave({
-            clientId: clientId.trim(),
-            clientSecret: clientSecret.trim() || undefined,
-          });
-          setSavedInVault(Boolean(saved.clientId));
-          setSecretSaved(saved.hasSecret);
-        } catch {
-          /* non-fatal — continue with the entered values for this sign-in */
-        }
+      const { authUrl } = await api.bigQueryOauthStart(
+        clientId.trim() || clientSecret.trim()
+          ? { clientId: clientId.trim() || undefined, clientSecret: clientSecret.trim() || undefined }
+          : {},
+      );
+      const w = window.open(authUrl, 'bq-oauth', 'width=520,height=680');
+      popupRef.current = w;
+      if (!w) {
+        setConnecting(false);
+        setConnectError('Could not open the Google sign-in window. Allow pop-ups for this site and try again.');
       }
-      const { authUrl } = await api.bigQueryOauthStart({
-        clientId: clientId.trim() || undefined,
+    } catch (e) {
+      setConnecting(false);
+      setConnectError(e instanceof Error ? e.message : 'Could not start Google sign-in.');
+    }
+  }
+
+  async function saveCredsInVault(): Promise<void> {
+    if (!clientId.trim()) {
+      setConnectError('Enter a Google OAuth Client ID to save.');
+      return;
+    }
+    setSavingVault(true);
+    setConnectError(null);
+    try {
+      await api.saveBigQueryAccount({
+        clientId: clientId.trim(),
         clientSecret: clientSecret.trim() || undefined,
       });
+      setSavedInVault(true);
+      if (clientSecret.trim()) setSecretSaved(true);
+      await onVaultSaved();
+      setVaultNotice('Saved in Vault.');
+    } catch (e) {
+      setConnectError(e instanceof Error ? e.message : 'Could not save BigQuery client.');
+    } finally {
+      setSavingVault(false);
+    }
+  }
+
+  async function useSavedCreds(): Promise<void> {
+    if (!vaultSaved) return;
+    setClientId(vaultSummary?.bigQueryOAuthClientId ?? clientId);
+    setClientSecret('');
+    setConnecting(true);
+    setConnectError(null);
+    setVaultNotice(null);
+    try {
+      const { authUrl } = await api.bigQueryOauthStart({});
       const w = window.open(authUrl, 'bq-oauth', 'width=520,height=680');
       popupRef.current = w;
       if (!w) {
@@ -383,8 +422,8 @@ export function BigQueryBuild({
                     <code>{redirectUri || 'http://localhost:4000/api/connectors/bigquery/oauth/callback'}</code>
                   </li>
                   <li>
-                    Copy the <strong>Client ID</strong> (and <strong>secret</strong>) into the fields below. Tick “Save to my
-                    vault” so you never have to do this again.
+                    Copy the <strong>Client ID</strong> (and <strong>secret</strong>) into the fields below, then
+                    click <strong>Save Creds in Vault</strong> so you never have to paste them again.
                   </li>
                 </ol>
                 <div className="small muted" style={{ marginTop: 6 }}>
@@ -423,36 +462,45 @@ export function BigQueryBuild({
                 <code>{redirectUri}</code>.
               </div>
             ) : null}
-            <label className="checkline full" style={{ marginTop: 2 }}>
-              <input
-                type="checkbox"
-                checked={saveToVault}
-                onChange={(e) => setSaveToVault(e.target.checked)}
-                disabled={connected}
-              />
-              <span>
-                Save to my vault (encrypted, per-user) so I don’t re-enter it next time. The access token from sign-in is
-                never stored — only this reusable client id/secret.
-              </span>
-            </label>
           </div>
         ) : null}
-        <div className="row">
+        <div className="row" style={{ flexWrap: 'wrap' }}>
           <button
             className={connected ? 'secondary' : ''}
             onClick={signIn}
-            disabled={!canSignIn}
+            disabled={!canSignIn || savingVault}
           >
             {connecting ? <Busy label="Waiting for Google…" /> : connected ? 'Reconnect with Google' : 'Sign in with Google'}
           </button>
+          {needsClient ? (
+            <>
+              <button
+                type="button"
+                className="secondary"
+                onClick={saveCredsInVault}
+                disabled={!clientId.trim() || connecting || savingVault}
+              >
+                {savingVault ? <Busy label="Saving…" /> : 'Save Creds in Vault'}
+              </button>
+              <button
+                type="button"
+                className="ghost"
+                onClick={useSavedCreds}
+                disabled={!vaultSaved || connecting || savingVault}
+              >
+                Use Saved Creds
+              </button>
+            </>
+          ) : null}
           {!connected && !connectError ? (
             <span className="small muted">
-              {needsClient && !clientId.trim()
+              {needsClient && !clientId.trim() && !vaultSaved
                 ? 'Enter your Google OAuth Client ID to enable sign-in.'
                 : 'Opens a popup to authorize BigQuery access.'}
             </span>
           ) : null}
         </div>
+        {vaultNotice ? <p className="small muted" style={{ marginTop: 8 }}>{vaultNotice}</p> : null}
         {connectError ? (
           <div className="warnbox small" style={{ marginTop: 10 }}>
             {connectError}

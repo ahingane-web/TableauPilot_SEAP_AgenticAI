@@ -27,7 +27,15 @@ import {
 } from './crypto.js';
 import { createSession, destroySession, getSession, type Session } from './session.js';
 import { getRecord, hasUser, putRecord } from './store.js';
-import { summarizeCredentials, type CredentialSummary, type TableauCredentials, type VaultRecord } from './types.js';
+import {
+  summarizeCredentials,
+  type CredentialSummary,
+  type TableauCredentials,
+  type VaultDataCloudLogin,
+  type VaultRecord,
+  type VaultSalesforceLogin,
+  type VaultSnowflakeLogin,
+} from './types.js';
 
 const log = logger.child('vault');
 
@@ -44,8 +52,8 @@ function nowIso(): string {
 
 /**
  * Verify a PIN against a vault record, applying lockout/rate-limiting. Returns the
- * derived vault key on success. Shared by unlock and by credential modification so
- * both paths enforce the same brute-force protection and behave identically.
+ * derived vault key on success. Shared by unlock and by credential update/delete so
+ * those paths enforce the same brute-force protection and behave identically.
  */
 function verifyPinOrThrow(record: VaultRecord, pin: string): Buffer {
   const cfg = getConfig().vault;
@@ -156,15 +164,16 @@ export const VaultService = {
     const record = getRecord(session.username);
     if (!record) throw new AppError('AUTH_REQUIRED', 'Session user no longer exists.');
     validateCredentials(creds);
-    record.creds = encrypt(session.vaultKey, JSON.stringify(creds));
+    const next = keepConnectorLogins(session.credentials, creds);
+    record.creds = encrypt(session.vaultKey, JSON.stringify(next));
     record.updatedAt = nowIso();
     putRecord(record);
-    session.credentials = creds;
+    session.credentials = next;
     log.info('Saved Tableau credentials to vault', {
       username: session.username,
-      hasConnectedApp: Boolean(creds.connectedApp),
+      hasConnectedApp: Boolean(next.connectedApp),
     });
-    return summarizeCredentials(creds);
+    return summarizeCredentials(next);
   },
 
   /**
@@ -178,20 +187,39 @@ export const VaultService = {
 
     const key = verifyPinOrThrow(record, pin);
     validateCredentials(creds);
+    const next = keepConnectorLogins(session.credentials, creds);
 
-    record.creds = encrypt(key, JSON.stringify(creds));
+    record.creds = encrypt(key, JSON.stringify(next));
     record.updatedAt = nowIso();
     putRecord(record);
 
     session.vaultKey = key;
-    session.credentials = creds;
+    session.credentials = next;
     resetTableauState(session);
 
     log.info('Updated Tableau credentials in vault', {
       username: session.username,
-      hasConnectedApp: Boolean(creds.connectedApp),
+      hasConnectedApp: Boolean(next.connectedApp),
     });
-    return summarizeCredentials(creds);
+    return summarizeCredentials(next);
+  },
+
+  /**
+   * Remove saved Tableau credentials AFTER re-confirming the PIN. The vault user
+   * (username + PIN) remains; only the encrypted credential blob is cleared. Live
+   * Tableau auth, workflow context, and transient connector state are reset.
+   */
+  deleteCredentials(session: Session, pin: string): void {
+    const record = getRecord(session.username);
+    if (!record) throw new AppError('AUTH_REQUIRED', 'Session user no longer exists.');
+    verifyPinOrThrow(record, pin);
+    record.creds = null;
+    record.updatedAt = nowIso();
+    putRecord(record);
+    session.credentials = undefined;
+    session.connectors = undefined;
+    resetTableauState(session);
+    log.info('Deleted Tableau credentials from vault', { username: session.username });
   },
 
   /** Non-secret summary of the session's saved credentials (for prefilling edits). */
@@ -247,6 +275,124 @@ export const VaultService = {
     return { clientId: bq?.clientId, clientSecret: bq?.clientSecret };
   },
 
+  /** PIN-gated replace of the BigQuery OAuth client (empty clientId clears it). */
+  updateBigQueryOAuthClient(
+    session: Session,
+    pin: string,
+    input: { clientId: string; clientSecret?: string },
+  ): CredentialSummary {
+    requirePin(session, pin);
+    return VaultService.saveBigQueryOAuthClient(session, input);
+  },
+
+  /** PIN-gated delete of the BigQuery OAuth client only. */
+  deleteBigQueryOAuthClient(session: Session, pin: string): CredentialSummary {
+    requirePin(session, pin);
+    return VaultService.saveBigQueryOAuthClient(session, { clientId: '' });
+  },
+
+  saveSalesforceAccount(session: Session, input: VaultSalesforceLogin): CredentialSummary {
+    const login = normalizeSalesforceLogin(input, session.credentials?.salesforce);
+    return persistConnectorSlice(session, (creds) => ({ ...creds, salesforce: login }), 'Saved Salesforce login to vault');
+  },
+
+  updateSalesforceAccount(session: Session, pin: string, input: VaultSalesforceLogin): CredentialSummary {
+    requirePin(session, pin);
+    return VaultService.saveSalesforceAccount(session, input);
+  },
+
+  deleteSalesforceAccount(session: Session, pin: string): CredentialSummary {
+    requirePin(session, pin);
+    return persistConnectorSlice(session, (creds) => ({ ...creds, salesforce: undefined }), 'Deleted Salesforce login from vault');
+  },
+
+  getSalesforceAccount(session: Session): VaultSalesforceLogin | undefined {
+    return session.credentials?.salesforce;
+  },
+
+  saveDataCloudAccount(session: Session, input: VaultDataCloudLogin): CredentialSummary {
+    const login = normalizeDataCloudLogin(input, session.credentials?.dataCloud);
+    return persistConnectorSlice(session, (creds) => ({ ...creds, dataCloud: login }), 'Saved Data Cloud login to vault');
+  },
+
+  updateDataCloudAccount(session: Session, pin: string, input: VaultDataCloudLogin): CredentialSummary {
+    requirePin(session, pin);
+    return VaultService.saveDataCloudAccount(session, input);
+  },
+
+  deleteDataCloudAccount(session: Session, pin: string): CredentialSummary {
+    requirePin(session, pin);
+    return persistConnectorSlice(session, (creds) => ({ ...creds, dataCloud: undefined }), 'Deleted Data Cloud login from vault');
+  },
+
+  getDataCloudAccount(session: Session): VaultDataCloudLogin | undefined {
+    return session.credentials?.dataCloud;
+  },
+
+  saveSnowflakeAccount(session: Session, input: VaultSnowflakeLogin): CredentialSummary {
+    const login = normalizeSnowflakeLogin(input, session.credentials?.snowflake);
+    return persistConnectorSlice(session, (creds) => ({ ...creds, snowflake: login }), 'Saved Snowflake login to vault');
+  },
+
+  updateSnowflakeAccount(session: Session, pin: string, input: VaultSnowflakeLogin): CredentialSummary {
+    requirePin(session, pin);
+    return VaultService.saveSnowflakeAccount(session, input);
+  },
+
+  deleteSnowflakeAccount(session: Session, pin: string): CredentialSummary {
+    requirePin(session, pin);
+    return persistConnectorSlice(session, (creds) => ({ ...creds, snowflake: undefined }), 'Deleted Snowflake login from vault');
+  },
+
+  getSnowflakeAccount(session: Session): VaultSnowflakeLogin | undefined {
+    return session.credentials?.snowflake;
+  },
+
+  /**
+   * Fill omitted Salesforce login fields from the vault. Request values win when present.
+   * Used by connect/publish routes so the UI can omit secrets.
+   */
+  mergeSalesforceLogin(
+    session: Session,
+    body: Partial<VaultSalesforceLogin> | undefined,
+  ): VaultSalesforceLogin {
+    const saved = session.credentials?.salesforce;
+    return {
+      url: String(body?.url ?? '').trim() || saved?.url || '',
+      username: String(body?.username ?? '').trim() || saved?.username || '',
+      password: body?.password ? String(body.password) : saved?.password || '',
+      token: String(body?.token ?? '') || saved?.token,
+    };
+  },
+
+  mergeDataCloudLogin(
+    session: Session,
+    body: Partial<VaultDataCloudLogin> | undefined,
+  ): VaultDataCloudLogin {
+    const saved = session.credentials?.dataCloud;
+    return {
+      url: String(body?.url ?? '').trim() || saved?.url || '',
+      clientId: String(body?.clientId ?? '').trim() || saved?.clientId,
+      clientSecret: String(body?.clientSecret ?? '') || saved?.clientSecret,
+      username: String(body?.username ?? '').trim() || saved?.username,
+      password: body?.password !== undefined && body.password !== '' ? String(body.password) : saved?.password,
+      token: String(body?.token ?? '') || saved?.token,
+    };
+  },
+
+  mergeSnowflakeLogin(
+    session: Session,
+    body: Partial<VaultSnowflakeLogin> | undefined,
+  ): VaultSnowflakeLogin {
+    const saved = session.credentials?.snowflake;
+    return {
+      url: String(body?.url ?? '').trim() || saved?.url || '',
+      warehouse: String(body?.warehouse ?? '').trim() || saved?.warehouse || '',
+      username: String(body?.username ?? '').trim() || saved?.username || '',
+      password: body?.password ? String(body.password) : saved?.password || '',
+    };
+  },
+
   /** Read decrypted credentials from the live session (never from disk on demand). */
   getCredentials(session: Session): TableauCredentials {
     if (!session.credentials) {
@@ -267,6 +413,94 @@ export const VaultService = {
     return s;
   },
 };
+
+/** Keep previously saved connector logins when replacing only the Tableau PAT fields. */
+function keepConnectorLogins(existing: TableauCredentials | undefined, incoming: TableauCredentials): TableauCredentials {
+  return {
+    ...incoming,
+    bigQueryOAuth: incoming.bigQueryOAuth ?? existing?.bigQueryOAuth,
+    salesforce: incoming.salesforce ?? existing?.salesforce,
+    dataCloud: incoming.dataCloud ?? existing?.dataCloud,
+    snowflake: incoming.snowflake ?? existing?.snowflake,
+  };
+}
+
+function requireSavedTableau(session: Session): TableauCredentials {
+  if (!session.credentials) {
+    throw new AppError('AUTH_REQUIRED', 'Save your Tableau connection details first, then save connector credentials.', {
+      hint: 'Save Tableau Cloud credentials in Vault before storing a connector login.',
+    });
+  }
+  return session.credentials;
+}
+
+function requirePin(session: Session, pin: string): Buffer {
+  const record = getRecord(session.username);
+  if (!record) throw new AppError('AUTH_REQUIRED', 'Session user no longer exists.');
+  const key = verifyPinOrThrow(record, pin);
+  session.vaultKey = key;
+  return key;
+}
+
+function persistConnectorSlice(
+  session: Session,
+  mutate: (creds: TableauCredentials) => TableauCredentials,
+  message: string,
+): CredentialSummary {
+  const record = getRecord(session.username);
+  if (!record) throw new AppError('AUTH_REQUIRED', 'Session user no longer exists.');
+  const current = requireSavedTableau(session);
+  const next = mutate(current);
+  record.creds = encrypt(session.vaultKey, JSON.stringify(next));
+  record.updatedAt = nowIso();
+  putRecord(record);
+  session.credentials = next;
+  log.info(message, { username: session.username });
+  return summarizeCredentials(next);
+}
+
+function normalizeSalesforceLogin(input: VaultSalesforceLogin, existing?: VaultSalesforceLogin): VaultSalesforceLogin {
+  const url = String(input.url ?? '').trim();
+  const username = String(input.username ?? '').trim();
+  const password = String(input.password ?? '') || existing?.password || '';
+  const token = String(input.token ?? '') || existing?.token;
+  if (!url || !username || !password) {
+    throw new AppError('VALIDATION', 'Salesforce login URL, username, and password are required.');
+  }
+  return { url, username, password, ...(token ? { token } : {}) };
+}
+
+function normalizeDataCloudLogin(input: VaultDataCloudLogin, existing?: VaultDataCloudLogin): VaultDataCloudLogin {
+  const url = String(input.url ?? '').trim();
+  const clientId = String(input.clientId ?? '').trim() || existing?.clientId;
+  const clientSecret = String(input.clientSecret ?? '') || existing?.clientSecret;
+  const username = String(input.username ?? '').trim() || existing?.username;
+  const password = String(input.password ?? '') || existing?.password;
+  const token = String(input.token ?? '') || existing?.token;
+  if (!url) throw new AppError('VALIDATION', 'A Salesforce My Domain URL is required for Data Cloud.');
+  if (!clientId && !username) {
+    throw new AppError('VALIDATION', 'Save a Connected App consumer key, or a Salesforce username for SOAP login.');
+  }
+  return {
+    url,
+    ...(clientId ? { clientId } : {}),
+    ...(clientSecret ? { clientSecret } : {}),
+    ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
+    ...(token ? { token } : {}),
+  };
+}
+
+function normalizeSnowflakeLogin(input: VaultSnowflakeLogin, existing?: VaultSnowflakeLogin): VaultSnowflakeLogin {
+  const url = String(input.url ?? '').trim();
+  const warehouse = String(input.warehouse ?? '').trim();
+  const username = String(input.username ?? '').trim();
+  const password = String(input.password ?? '') || existing?.password || '';
+  if (!url || !warehouse || !username || !password) {
+    throw new AppError('VALIDATION', 'Snowflake server URL, warehouse, username, and password are required.');
+  }
+  return { url, warehouse, username, password };
+}
 
 function validateCredentials(creds: TableauCredentials): void {
   const problems: string[] = [];

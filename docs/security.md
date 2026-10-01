@@ -1,12 +1,12 @@
 # Security
 
-> Living document. Last updated: 2026-09-30.
+> Living document. Last updated: 2026-10-01.
 
 ## Threat model & goals
 
 1. Secrets (Tableau PAT secret, Connected App secret, REST token; connector source
    credentials/tokens such as Salesforce creds, the Google BigQuery OAuth token, and the
-   Data Cloud SOAP/CDP tokens; the Snowflake session token + password; and any saved OAuth client secret) must **never** reach the
+   Data Cloud OAuth/SOAP session + CDP tokens; the Snowflake session token + password; and any saved OAuth client secret) must **never** reach the
    browser, the LLM, logs, traces, Mastra memory, or workflow state.
 2. Credentials at rest must be unreadable without the user's PIN.
 3. A 6-digit PIN is low entropy, so brute force must be economically infeasible and
@@ -27,6 +27,14 @@
 - **Rate limiting / lockout:** repeated failures lock the account for a cool-down
   window to make online PIN guessing infeasible.
 - **File perms:** `vault.json` is written `0o600` under `DATA_PATH`.
+- **PIN-gated mutation:** even inside an unlocked session, changing or deleting the
+  saved Tableau blob or a connector login section requires the PIN again. Tableau delete
+  sets `record.creds = null` and clears in-memory credentials + connector state.
+  Per-section delete (Salesforce / BigQuery client / Data Cloud / Snowflake) clears only
+  that nested object. The SPA never receives secrets — only a `CredentialSummary`.
+  **Login materials** (Salesforce password, Snowflake password, Data Cloud Connected App
+  secret, BigQuery OAuth client secret) may live in the PIN-encrypted blob. Live
+  connector **session tokens** still never persist.
 
 ## Session model
 
@@ -50,15 +58,17 @@
 - **Memory:** Mastra Memory stores non-sensitive preferences only; no credentials.
 - **Tool I/O:** tools return names/counts/metadata only; never tokens or PAT secrets.
 - **Frontend:** `app/api.ts` stores only the session id in `localStorage`; the client
-  type surface (`app/types.ts`) contains no secret fields.
+  type surface (`app/types.ts`) contains no secret fields. Connector passwords are typed
+  on the Build connect forms (**Save Creds in Vault** posts them; **Use Saved Creds**
+  never reads them back). Vault shows non-secret summaries only.
 
 ## Salesforce connector
 
-- **Transient only.** Salesforce credentials (username/password + optional token, or the
-  OAuth access token) and the live Salesforce session are held **in-memory** on
-  `session.connectors.salesforce`, used only to describe objects / query rows / build the
-  extract, and **cleared once publishing completes**. They are never persisted to the
-  vault and never sent to the browser or the LLM.
+- **Vault login materials (optional).** Salesforce username/password may be saved
+  encrypted in the user's PIN vault (`TableauCredentials.salesforce`) from the Salesforce
+  connect form (**Save Creds in Vault**) and reused with **Use Saved Creds**. Live SOAP/OAuth sessions remain
+  **in-memory** on `session.connectors.salesforce` and are **cleared once publishing
+  completes**. They are never sent to the browser or the LLM.
 - **Never embedded in the extract.** The published `.hyper`/`.tds` contains **no**
   Salesforce credentials. Refreshability on Cloud comes from the publisher's **saved
   Salesforce OAuth credential** (embedded on the datasource connection by username match),
@@ -97,7 +107,8 @@
   **client** id/secret (the app-registration credential, analogous to the Tableau Connected App
   secret — *not* a user data token) may be saved **encrypted in the user's vault**
   (`TableauCredentials.bigQueryOAuth`, AES-256-GCM under the PIN key) so it need not be re-entered.
-  It never reaches the browser (the client only learns the non-secret client id + a "has secret"
+  The Sign-in step collects Client ID/secret; **Save Creds in Vault** stores the client only
+  (not the Google access token). It never reaches the browser (the client only learns the non-secret client id + a "has secret"
   flag) and is resolved server-side in the order request → vault → `GOOGLE_OAUTH_*`.
 - **OAuth (PKCE).** The browser flow uses PKCE; the pending `state`/verifier + client id/secret
   live in a short-TTL, single-use map (`src/bigquery/oauthStore.ts`) that routes the header-less
@@ -112,14 +123,17 @@
 
 ## Salesforce Data Cloud connector
 
-- **Tokens are transient only.** The Salesforce SOAP session and the Data Cloud CDP token
-  are held **in-memory** on `session.connectors.datacloud`, used only to list data spaces/
-  objects, describe columns, and (for an extract) query rows, and are **cleared once
-  publishing completes**. They are never persisted to the vault, never sent to the browser
-  or the LLM, and never logged (`src/datacloud/*` redacts).
-- **Password login, not a new OAuth client.** The UI copies the Salesforce username/password
-  form; `src/datacloud/client.ts` imports unmodified `Salesforce.login` then exchanges a CDP
-  token (`POST /services/a360/token`). No new env vars.
+- **Login materials may be vaulted; session tokens are not.** My Domain + Connected App
+  (and optional SOAP username/password) can be saved in `TableauCredentials.dataCloud`
+  from the Data Cloud connect form.
+  The Salesforce OAuth or SOAP session and the Data Cloud CDP token stay
+  **in-memory** on `session.connectors.datacloud` and are **cleared once publishing
+  completes**.
+- **OAuth with CDP scopes; SOAP is fallback.** The UI signs in with Salesforce in a popup
+  (`src/datacloud/oauth.ts` requests `api cdp_query_api` only — extra scopes on the authorize
+  URL cause `OAUTH_APPROVAL_ERROR_GENERIC` when they are not selected on the Connected App).
+  Consumer Key/Secret stay in the form or `SALESFORCE_OAUTH_*`. SOAP `Salesforce.login` remains
+  for password fallback; SOAP session ids often fail `POST /services/a360/token` (HTTP 500).
 - **Saved-credential match, not the SOAP password.** Both live and extract datasources embed
   the publisher's **saved Salesforce Data Cloud OAuth credential** on Tableau Cloud (matched
   by username). **No Data Cloud credential is ever baked into the `.tds`/`.hyper`.**
@@ -128,11 +142,10 @@
 
 ## Snowflake connector
 
-- **Tokens are transient only.** The Snowflake session token and password are held
-  **in-memory** on `session.connectors.snowflake`, used only to list warehouses/databases/
-  schemas/tables, describe columns, and (for an extract) query rows, and are **cleared once
-  publishing completes**. They are never persisted to the vault, never sent to the browser
-  or the LLM, and never logged (`src/snowflake/*` redacts).
+- **Session token is transient; login may be vaulted.** Username/password can be saved in
+  `TableauCredentials.snowflake` from the Snowflake connect form. The Snowflake **session token** (and the in-memory copy
+  of the password used for that session) stay on `session.connectors.snowflake` and are
+  **cleared once publishing completes**. They are never sent to the browser or the LLM.
 - **Username/password, not OAuth.** The UI collects server URL / warehouse / username /
   password; `src/snowflake/client.ts` uses session REST login. No new env vars.
 - **Password is embedded at publish.** Both live and extract datasources send Tableau REST

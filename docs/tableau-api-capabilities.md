@@ -1,6 +1,6 @@
 # Tableau API Capabilities — what is and isn't automatable
 
-> Living document. Last updated: 2026-09-30.
+> Living document. Last updated: 2026-10-01.
 
 TableauPilot is deliberately honest about where each operation can happen. We map
 every capability to one of five buckets.
@@ -8,7 +8,7 @@ every capability to one of five buckets.
 | Capability | How | Automated? |
 |---|---|---|
 | Authenticate (REST) | PAT sign-in | ✅ Category A (REST) |
-| Discover sites/projects/workbooks/views/datasources | REST list endpoints | ✅ Category A |
+| Discover sites/projects/workbooks/views/datasources | REST list endpoints (SPA **Use Published** picker then filters datasources to the selected project folder) | ✅ Category A |
 | Read datasource fields (dimensions/measures/dates) | Metadata API (GraphQL) | ✅ Category A |
 | Permission checks | REST permissions endpoints | ✅ Category A (advisory) |
 | **Build a workbook/dashboard** | Generate `.twb` XML → REST publish | ✅ Category A-gen |
@@ -98,8 +98,9 @@ Google token stays transient and in-memory.
 
 ## Category A-gen — Compile a Salesforce Data Cloud datasource (live OR extract)
 
-The Data Cloud connector authenticates via **Salesforce SOAP login** (imported, unmodified)
-then a CDP token exchange (`POST /services/a360/token`). It lists data spaces and objects
+The Data Cloud connector authenticates via **Salesforce browser OAuth** with CDP scopes
+(`api`, `cdp_query_api`, …; SOAP login is a fallback). A SOAP session id is often rejected
+by `POST /services/a360/token` (HTTP 500). It lists data spaces and objects
 (DMO / DLO / Calculated Insights) over pure-fetch Data Cloud HTTP (`src/datacloud/client.ts`).
 It compiles the SAME `.tds` shapes (single / relationships object-graph / physical join) as
 the other connectors, but with `class='salesforce-genie'`, `authentication='oauth'`,

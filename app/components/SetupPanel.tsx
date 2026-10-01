@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { DatasourceMetadataView, NamedItem, SessionContext } from '../types';
+import type { CredentialSummary, DatasourceMetadataView, NamedItem, SessionContext } from '../types';
 import { Busy, ErrorPanel, Collapsible } from './common';
 import { DataModelBuilder, type DataModel } from './DataModelBuilder';
 import { ExcelBuild } from './ExcelBuild';
@@ -29,7 +29,17 @@ type Connector = 'salesforce' | 'excel' | 'bigquery' | 'datacloud' | 'snowflake'
  * The datasource lock is the single source of truth; changing it requires an
  * explicit confirmation (change guard).
  */
-export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (ctx: SessionContext) => void }): React.ReactElement {
+export function SetupPanel({
+  ctx,
+  onChange,
+  vaultNonce = 0,
+  onVaultChange,
+}: {
+  ctx: SessionContext;
+  onChange: (ctx: SessionContext) => void;
+  vaultNonce?: number;
+  onVaultChange?: () => void;
+}): React.ReactElement {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -44,7 +54,7 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
   // freshly published datasource, so the downstream dashboard flow is unchanged.
   const [mode, setMode] = useState<'published' | 'build'>('published');
   // Which connector the build flow targets (Salesforce or Excel).
-  const [connector, setConnector] = useState<Connector>('salesforce');
+  const [connector, setConnector] = useState<Connector | ''>('');
   // Build-datasource inputs. Salesforce credentials are used ONLY to read the object
   // schema (describe) so fields are available immediately; they are NOT embedded. The
   // published datasource connects via the user's SAVED Salesforce credential on Tableau.
@@ -58,6 +68,31 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
   // Emit server-oauth='server-custom' (a custom Salesforce OAuth client on the site,
   // as in the reference). Uncheck to use Tableau's built-in Salesforce OAuth client.
   const [sfServerCustom, setSfServerCustom] = useState(true);
+  const [vaultSummary, setVaultSummary] = useState<CredentialSummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .getCredentials()
+      .then((r) => {
+        if (!cancelled) setVaultSummary(r.credentialSummary);
+      })
+      .catch(() => {
+        if (!cancelled) setVaultSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ctx.hasCredentials, vaultNonce]);
+
+  async function reloadVault(): Promise<void> {
+    try {
+      const r = await api.getCredentials();
+      setVaultSummary(r.credentialSummary);
+    } catch {
+      /* ignore */
+    }
+  }
 
   async function refresh(): Promise<void> {
     const c = await api.context();
@@ -146,13 +181,16 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
   }
 
   async function publishSalesforce(tables: string[], relationships: SfRelationship[], mode: SfMode): Promise<void> {
-    if (!sfUrl || !sfUsername || !sfPassword || tables.length === 0 || !sfProjectId || !sfDsName) return;
+    const useVault = Boolean(vaultSummary?.hasSalesforce) && !sfPassword;
+    if ((!useVault && (!sfUrl || !sfUsername || !sfPassword)) || tables.length === 0 || !sfProjectId || !sfDsName) return;
     setBusy('sf-publish');
     setError(null);
     setNotice(null);
     try {
       const res = await api.salesforcePublish({
-        credentials: { url: sfUrl, username: sfUsername, password: sfPassword, token: sfToken || undefined },
+        credentials: useVault
+          ? {}
+          : { url: sfUrl, username: sfUsername, password: sfPassword, token: sfToken || undefined },
         tables,
         relationships,
         mode,
@@ -265,26 +303,36 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                 </div>
 
                 {mode === 'published' ? (
-                  <div className="row">
-                    <select value={selDs} onChange={(e) => setSelDs(e.target.value)} style={{ flex: 1 }}>
-                      <option value="">Select a datasource…</option>
-                      {datasources.map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {d.name}
-                          {d.projectName ? ` — ${d.projectName}` : ''}
-                        </option>
-                      ))}
-                    </select>
-                    <button onClick={lock} disabled={!selDs || busy === 'lock'}>
-                      {busy === 'lock' ? <Busy label="Locking…" /> : 'Lock'}
-                    </button>
-                  </div>
+                  !ctx.projectContext ? (
+                    <p className="hint">Select a target project (folder) above, then pick a datasource in that folder.</p>
+                  ) : (
+                    <div className="row">
+                      <select value={selDs} onChange={(e) => setSelDs(e.target.value)} style={{ flex: 1 }}>
+                        <option value="">Select a datasource in {ctx.projectContext.projectName}…</option>
+                        {datasources
+                          .filter((d) => d.projectName === ctx.projectContext?.projectName)
+                          .map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}
+                            </option>
+                          ))}
+                      </select>
+                      <button onClick={lock} disabled={!selDs || busy === 'lock'}>
+                        {busy === 'lock' ? <Busy label="Locking…" /> : 'Lock'}
+                      </button>
+                    </div>
+                  )
                 ) : (
                   <>
                     <div className="row" style={{ marginBottom: 10 }}>
                       <div style={{ flex: 1 }}>
                         <label className="small">Connector</label>
-                        <select value={connector} onChange={(e) => setConnector(e.target.value as Connector)} style={{ width: '100%' }}>
+                        <select
+                          value={connector}
+                          onChange={(e) => setConnector(e.target.value as Connector | '')}
+                          style={{ width: '100%' }}
+                        >
+                          <option value="">Select the connector</option>
                           <option value="salesforce">Salesforce</option>
                           <option value="excel">Excel (.xlsx)</option>
                           <option value="bigquery">Google BigQuery</option>
@@ -293,7 +341,9 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                         </select>
                       </div>
                     </div>
-                    {connector === 'salesforce' ? (
+                    {!connector ? (
+                      <p className="hint">Select the connector to start building a datasource.</p>
+                    ) : connector === 'salesforce' ? (
                       <SalesforceBuild
                         busy={busy}
                         url={sfUrl}
@@ -314,15 +364,50 @@ export function SetupPanel({ ctx, onChange }: { ctx: SessionContext; onChange: (
                         serverCustom={sfServerCustom}
                         setServerCustom={setSfServerCustom}
                         onPublish={publishSalesforce}
+                        vaultSummary={vaultSummary}
+                        onVaultSaved={async () => {
+                          await reloadVault();
+                          onVaultChange?.();
+                        }}
                       />
                     ) : connector === 'excel' ? (
                       <ExcelBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
                     ) : connector === 'bigquery' ? (
-                      <BigQueryBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                      <BigQueryBuild
+                        busy={busy}
+                        setBusy={setBusy}
+                        projects={projects}
+                        onPublished={afterBuildPublished}
+                        vaultSummary={vaultSummary}
+                        onVaultSaved={async () => {
+                          await reloadVault();
+                          onVaultChange?.();
+                        }}
+                      />
                     ) : connector === 'datacloud' ? (
-                      <DataCloudBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                      <DataCloudBuild
+                        busy={busy}
+                        setBusy={setBusy}
+                        projects={projects}
+                        onPublished={afterBuildPublished}
+                        vaultSummary={vaultSummary}
+                        onVaultSaved={async () => {
+                          await reloadVault();
+                          onVaultChange?.();
+                        }}
+                      />
                     ) : (
-                      <SnowflakeBuild busy={busy} setBusy={setBusy} projects={projects} onPublished={afterBuildPublished} />
+                      <SnowflakeBuild
+                        busy={busy}
+                        setBusy={setBusy}
+                        projects={projects}
+                        onPublished={afterBuildPublished}
+                        vaultSummary={vaultSummary}
+                        onVaultSaved={async () => {
+                          await reloadVault();
+                          onVaultChange?.();
+                        }}
+                      />
                     )}
                   </>
                 )}
@@ -417,6 +502,8 @@ function SalesforceBuild({
   serverCustom,
   setServerCustom,
   onPublish,
+  vaultSummary,
+  onVaultSaved,
 }: {
   busy: string | null;
   url: string;
@@ -437,13 +524,18 @@ function SalesforceBuild({
   serverCustom: boolean;
   setServerCustom: (v: boolean) => void;
   onPublish: (tables: string[], relationships: SfRelationship[], mode: SfMode) => void;
+  vaultSummary: CredentialSummary | null;
+  onVaultSaved: () => Promise<void>;
 }): React.ReactElement {
   // Connecting establishes the transient Salesforce session used to list objects and
   // describe fields for the join-field dropdowns. Publishing re-logs in server-side.
   const [connecting, setConnecting] = useState(false);
+  const [savingVault, setSavingVault] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
   const [objects, setObjects] = useState<Array<{ name: string; label: string }>>([]);
   const connected = objects.length > 0;
+  const vaultSaved = Boolean(vaultSummary?.hasSalesforce);
 
   // Modeling (primary + additional objects, relationships/join, mode) is owned by the shared
   // DataModelBuilder; we only track the model it emits.
@@ -453,8 +545,47 @@ function SalesforceBuild({
     if (!url || !username || !password) return;
     setConnecting(true);
     setConnectError(null);
+    setVaultNotice(null);
     try {
       const res = await api.salesforceConnect({ url, username, password, token: token || undefined });
+      setObjects(res.tables);
+    } catch (e) {
+      setConnectError(e instanceof Error ? e.message : 'Could not connect to Salesforce.');
+      setObjects([]);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function saveCredsInVault(): Promise<void> {
+    if (!url || !username || !password) {
+      setConnectError('Fill URL, username, and password to save.');
+      return;
+    }
+    setSavingVault(true);
+    setConnectError(null);
+    try {
+      await api.saveSalesforceAccount({ url, username, password, token: token || undefined });
+      await onVaultSaved();
+      setVaultNotice('Saved in Vault.');
+    } catch (e) {
+      setConnectError(e instanceof Error ? e.message : 'Could not save Salesforce credentials.');
+    } finally {
+      setSavingVault(false);
+    }
+  }
+
+  async function useSavedCreds(): Promise<void> {
+    if (!vaultSaved) return;
+    setUrl(vaultSummary?.salesforceUrl ?? '');
+    setUsername(vaultSummary?.salesforceUsername ?? '');
+    setPassword('');
+    setToken('');
+    setConnecting(true);
+    setConnectError(null);
+    setVaultNotice(null);
+    try {
+      const res = await api.salesforceConnect({});
       setObjects(res.tables);
     } catch (e) {
       setConnectError(e instanceof Error ? e.message : 'Could not connect to Salesforce.');
@@ -548,18 +679,35 @@ function SalesforceBuild({
             />
           </div>
         </div>
-        <div className="row" style={{ marginTop: 12 }}>
+        <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
           <button
             className={connected ? 'secondary' : ''}
             onClick={connectSf}
-            disabled={!url || !username || !password || connecting}
+            disabled={!url || !username || !password || connecting || savingVault}
           >
             {connecting ? <Busy label="Connecting…" /> : connected ? 'Reconnect' : 'Connect to Salesforce'}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={saveCredsInVault}
+            disabled={!url || !username || !password || connecting || savingVault}
+          >
+            {savingVault ? <Busy label="Saving…" /> : 'Save Creds in Vault'}
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={useSavedCreds}
+            disabled={!vaultSaved || connecting || savingVault}
+          >
+            Use Saved Creds
           </button>
           {!connected && !connectError ? (
             <span className="small muted">Loads your objects and their fields for modeling.</span>
           ) : null}
         </div>
+        {vaultNotice ? <p className="small muted" style={{ marginTop: 8 }}>{vaultNotice}</p> : null}
         {connectError ? (
           <div className="warnbox small" style={{ marginTop: 10 }}>
             {connectError}

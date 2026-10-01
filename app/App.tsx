@@ -9,7 +9,7 @@ import { PublishedViewPanel } from './components/PublishedViewPanel';
 
 /**
  * TableauPilot AI — two-pane copilot.
- * Left: AI planning workflow (identity/PIN -> connect -> lock -> plan -> approve -> create -> verify).
+ * Left: optional Vault panel (Tableau creds + connector summaries) then connect -> lock -> plan -> create.
  * Right: the READ-ONLY published dashboard viewer (preview thumbnail + live embed).
  */
 export function App(): React.ReactElement {
@@ -25,6 +25,8 @@ export function App(): React.ReactElement {
   // Show/hide the right-hand published-dashboard pane. When hidden, the workflow pane
   // expands to the full width and the splitter/drag behavior is disabled.
   const [showDashboard, setShowDashboard] = useState(true);
+  const [showVault, setShowVault] = useState(false);
+  const [vaultNonce, setVaultNonce] = useState(0);
 
   useEffect(() => {
     if (!dragging) return;
@@ -64,6 +66,10 @@ export function App(): React.ReactElement {
       setBooting(false);
     })();
   }, []);
+
+  useEffect(() => {
+    if (ctx && !ctx.hasCredentials) setShowVault(true);
+  }, [ctx?.hasCredentials]);
 
   async function logout(): Promise<void> {
     await api.logout();
@@ -119,13 +125,29 @@ export function App(): React.ReactElement {
         >
           {booting ? (
             <div className="panel">Loading…</div>
-          ) : !ctx || !ctx.hasCredentials ? (
+          ) : !ctx ? (
             <ConnectionPanel onReady={setCtx} />
           ) : (
             <>
-              <CredentialsPanel ctx={ctx} onChange={setCtx} />
-              <SetupPanel ctx={ctx} onChange={setCtx} />
-              <PlanPanel ctx={ctx} onChange={setCtx} onCreated={setLastResult} />
+              <CredentialsPanel
+                ctx={ctx}
+                onChange={setCtx}
+                vaultNonce={vaultNonce}
+                onVaultChange={() => setVaultNonce((n) => n + 1)}
+                expanded={showVault}
+                onToggle={() => setShowVault((v) => !v)}
+              />
+              {ctx.hasCredentials ? (
+                <>
+                  <SetupPanel
+                    ctx={ctx}
+                    onChange={setCtx}
+                    vaultNonce={vaultNonce}
+                    onVaultChange={() => setVaultNonce((n) => n + 1)}
+                  />
+                  <PlanPanel ctx={ctx} onChange={setCtx} onCreated={setLastResult} />
+                </>
+              ) : null}
             </>
           )}
         </div>

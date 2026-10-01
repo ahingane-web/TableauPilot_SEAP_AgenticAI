@@ -1,7 +1,7 @@
 # Design — TableauPilot AI
 
 > Living document. Update this whenever module interfaces, schemas, algorithms, or
-> code-level decisions change. Last updated: 2026-09-30.
+> code-level decisions change. Last updated: 2026-10-01.
 
 This is the module-level design. For the big picture see
 [architecture.md](./architecture.md); for binding rules see [rules.md](./rules.md).
@@ -24,21 +24,33 @@ This is the module-level design. For the big picture see
 - `makeVerifier/checkVerifier` → validate a PIN without storing it.
 - `isValidPin` → exactly 6 digits.
 
-**Types (`types.ts`)**: `TableauCredentials` (secret), `CredentialSummary` (non-secret),
-`VaultRecord`; `summarizeCredentials()` strips secrets.
+**Types (`types.ts`)**: `TableauCredentials` (secret blob: Tableau PAT plus optional
+connector login materials), `CredentialSummary` (non-secret), `VaultRecord`;
+`summarizeCredentials()` strips secrets.
+
+**Service (`vault.ts`)** — `VaultService` singleton:
+- `register`, `unlock` (lockout after `VAULT_MAX_ATTEMPTS`, `VAULT_LOCKOUT_SECONDS`),
+  `saveCredentials`, `updateCredentials` / `deleteCredentials` (PIN-gated; share
+  `verifyPinOrThrow`), `getCredentialSummary`, `logout`, `requireSession`.
+- Connector logins (require Tableau PAT first): `saveSalesforceAccount` /
+  `saveDataCloudAccount` / `saveSnowflakeAccount` / `saveBigQueryOAuthClient` plus
+  PIN-gated update/delete and `merge*Login` helpers for connect/publish routes.
+- `resetTableauState(session)` clears `tableauAuth` + `flow` on Tableau credential update or
+  delete. Delete also clears `session.connectors` and the encrypted
+  blob (`record.creds = null`); vault username + PIN remain. Tableau PAT update
+  preserves nested connector logins.
+
+**UI:** Tableau save/edit/delete stays in `CredentialsPanel`. Connector logins are
+typed on the Build connect forms (**Save Creds in Vault** / **Use Saved Creds**);
+Vault shows compact non-secret summaries and PIN delete only. The Vault header stays
+mounted with **Show Vault** / **Hide Vault** (`showVault`, default hidden after Tableau
+credentials are saved). APIs above are unchanged.
 
 **Store (`store.ts`)**: JSON file at `DATA_PATH/vault.json`, mode `0o600`; created dir
 `0o700`.
 
 **Session (`session.ts`)**: in-memory `Session { id, username, vaultKey, credentials,
 tableauAuth, flow }`; `createSession/getSession/destroySession/startSessionSweeper`.
-
-**Service (`vault.ts`)** — `VaultService` singleton:
-- `register`, `unlock` (lockout after `VAULT_MAX_ATTEMPTS`, `VAULT_LOCKOUT_SECONDS`),
-  `saveCredentials`, `updateCredentials` (PIN-gated; shares `verifyPinOrThrow`),
-  `getCredentialSummary`, `logout`, `requireSession`.
-- `resetTableauState(session)` clears `tableauAuth` + `flow` on credential update
-  (forces reconnect with new creds).
 
 ## 3. LLM (`src/llm/index.ts`)
 
@@ -79,7 +91,8 @@ tableauAuth, flow }`; `createSession/getSession/destroySession/startSessionSweep
   connectivity `.superRefine`.
 - **Salesforce Data Cloud connector** (in `common.ts`): `DataCloudObjectCategorySchema`
   (`dmo|dlo|ci|all`), `DataCloudMaterializationSchema` (`live|extract`, default `extract`),
-  `DataCloudRelationshipSchema` (leftObject/rightObject like Salesforce), and
+  `DataCloudRelationshipSchema` (leftObject/rightObject like Salesforce),
+  `DataCloudCredentialsSchema` (password optional for OAuth), and
   `DataCloudBuildSchema` (credentials, dataSpace, category, tables[min 1], relationships[],
   mode, materialization, projectId, datasourceName, overwrite?) with the same union-find
   connectivity `.superRefine` as Salesforce.
@@ -315,15 +328,25 @@ near expiry. Transient state lives on `session.connectors.bigquery` (email + acc
 
 ## 5e. Salesforce Data Cloud connector — live OR extract datasource builder
 
-A fourth "Build datasource" entry point that signs in with the **same Salesforce
-username/password form** as CRM Salesforce (SOAP `login` imported unmodified — not OAuth),
-lists **Data Space → object category (DMO / DLO / Calculated Insights / All) → objects**, and
-reuses the SAME shared modeling UI (`DataModelBuilder`) + publish/lock pipeline. A
-**Live/Extract** selector chooses the shape. No Salesforce/Excel/BigQuery logic is touched
-(all additive).
+A fourth "Build datasource" entry point that signs in with **Salesforce browser OAuth**
+(CDP scopes `api cdp_query_api`; `display=popup`, no `prompt=login`) — SOAP username/password
+remains as a fallback. SOAP session ids often fail `POST /services/a360/token` (HTTP 500)
+because Salesforce expects an OAuth access token with `cdp_query_api`. Extra OAuth scopes
+(`refresh_token`, `cdp_profile_api`) are not requested — they cause
+`OAUTH_APPROVAL_ERROR_GENERIC` when the Connected App does not list them. Lists **Data Space →
+object category (DMO / DLO / Calculated Insights / All) → objects**, and reuses the SAME
+shared modeling UI (`DataModelBuilder`) + publish/lock pipeline. A **Live/Extract** selector
+chooses the shape. Salesforce `oauth.ts` internals are unchanged (PKCE helpers only);
+`Salesforce.login` is still imported unmodified for the SOAP fallback.
+
+**UI (`app/components/DataCloudBuild.tsx`)** — My Domain URL starts **empty** (placeholder +
+`title` tooltip; no hardcoded host). Connected App / callback / scope / `OAUTH_APPROVAL_ERROR_GENERIC`
+steps live in a collapsible how-to, matching `BigQueryBuild`. SOAP password login stays folded.
 
 **HTTP (`src/datacloud/client.ts`, pure `fetch`)** — `connect` = `Salesforce.login` +
-`exchangeCdpToken` (`POST {instanceUrl}/services/a360/token`,
+`exchangeCdpToken`; `connectWithOauthSession` skips SOAP and exchanges the OAuth access
+token. OAuth wrapper `src/datacloud/oauth.ts` builds the authorize URL with
+`api cdp_query_api` (not Salesforce CRM `buildAuthorizeUrl`, which forces `prompt=login`). `exchangeCdpToken` (`POST {instanceUrl}/services/a360/token`,
 `grant_type=urn:salesforce:grant-type:external:cdp`). The CDP token is **dataspace-scoped**
 (`dataspace=` on the token form); the façade re-exchanges when the user picks a non-default
 space. Subsequent CDP calls send a `dataspace` header. `listDataSpaces` (`GET {cdpHost}/api/v1/dataSpaces`,
@@ -349,7 +372,8 @@ adds `class='hyper'` over `Extract."<objectId>"` + `ObjectModelExtractV2` +
 `VConnDownstreamExtractsWithWarnings` + `context='extract'`. Do **not** reuse
 `generateSalesforceTds`.
 
-**Façade (`src/tableau/index.ts`)** — `dataCloudConnect`, `dataCloudListDataSpaces`,
+**Façade (`src/tableau/index.ts`)** — `dataCloudOauthStart`, `completeDataCloudOauth`,
+`dataCloudConnect`, `dataCloudListDataSpaces`,
 `dataCloudListObjects`, `dataCloudDescribeObject`, and
 `buildAndPublishDataCloudDatasource(session, input)`: describe each object → (extract only)
 query rows → generate the `.tds` (single/relationships/join × live/extract) → publish a
@@ -357,8 +381,9 @@ query rows → generate the `.tds` (single/relationships/join × live/extract) �
 OAuth credential → best-effort embed on the connection(s) → **extract-only**
 `refreshDatasourceNow` → lock + `dataCloudTablesToMetadata`. `dataCloudAuthForSpace` re-exchanges
 the CDP token when the selected data space is not the one the current token was issued for.
-Transient state lives on `session.connectors.datacloud` (creds + sfSession + cdp) and is
-cleared after publish.
+Publish skips SOAP reconnect when `session.connectors.datacloud` already has a CDP token
+(OAuth path stores an empty password). Transient state lives on `session.connectors.datacloud`
+(creds + sfSession + cdp) and is cleared after publish.
 
 ## 5f. Snowflake connector — live OR extract datasource builder
 
@@ -438,6 +463,15 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | POST | `/api/vault/credentials` | save Tableau creds |
 | GET | `/api/vault/credentials` | non-secret summary |
 | POST | `/api/vault/credentials/update` | PIN-gated update |
+| POST | `/api/vault/credentials/delete` | PIN-gated delete (identity remains) |
+| POST | `/api/vault/connectors/salesforce` | save/PIN-update Salesforce login |
+| POST | `/api/vault/connectors/salesforce/delete` | PIN-gated Salesforce section delete |
+| POST | `/api/vault/connectors/bigquery` | save/PIN-update BigQuery OAuth client |
+| POST | `/api/vault/connectors/bigquery/delete` | PIN-gated BigQuery section delete |
+| POST | `/api/vault/connectors/datacloud` | save/PIN-update Data Cloud login |
+| POST | `/api/vault/connectors/datacloud/delete` | PIN-gated Data Cloud section delete |
+| POST | `/api/vault/connectors/snowflake` | save/PIN-update Snowflake login |
+| POST | `/api/vault/connectors/snowflake/delete` | PIN-gated Snowflake section delete |
 | POST | `/api/tableau/connect` | PAT sign-in |
 | GET | `/api/tableau/{projects,datasources,workbooks,views}` | discovery |
 | GET | `/api/tableau/datasource/:id/metadata` | metadata (dims/measures/dates) |
@@ -453,7 +487,7 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | GET | `/api/connectors` | list source connectors (Salesforce, Excel, Google BigQuery, Salesforce Data Cloud, Snowflake) |
 | POST | `/api/connectors/salesforce/connect` | username/password login → list objects |
 | POST | `/api/connectors/salesforce/oauth/start` | begin browser OAuth (PKCE) |
-| GET | `/api/connectors/salesforce/oauth/callback` | OAuth redirect handler |
+| GET | `/api/connectors/salesforce/oauth/callback` | OAuth redirect handler (tries Data Cloud pending store first, then Salesforce CRM) |
 | GET | `/api/connectors/salesforce/tables` | listed objects for the session |
 | POST | `/api/connectors/salesforce/describe` | describe an object's fields |
 | POST | `/api/connectors/salesforce/publish` | build + publish extract datasource |
@@ -469,7 +503,8 @@ Hono BFF; CORS from `CORS_ORIGINS`; central `onError` → `sanitizeError`;
 | GET | `/api/connectors/bigquery/tables?projectId=&datasetId=` | list tables in a dataset |
 | POST | `/api/connectors/bigquery/describe` | describe a table's columns |
 | POST | `/api/connectors/bigquery/publish` | build + publish a **live or extract** BigQuery datasource |
-| POST | `/api/connectors/datacloud/connect` | Salesforce SOAP login + CDP token exchange |
+| POST | `/api/connectors/datacloud/oauth/start` | Data Cloud browser OAuth (CDP scopes); same callback URI as Salesforce CRM |
+| POST | `/api/connectors/datacloud/connect` | Salesforce SOAP login + CDP token exchange (fallback) |
 | GET | `/api/connectors/datacloud/dataspaces` | list Data Cloud data spaces |
 | GET | `/api/connectors/datacloud/objects?dataSpace=&category=` | list objects in a data space (DMO/DLO/CI/all) |
 | POST | `/api/connectors/datacloud/describe` | describe an object's scalar columns |
@@ -489,11 +524,17 @@ Client returns a sanitized error envelope `{ error: { code, message, hint?, deta
 `api.ts` stores only the session id (localStorage) and injects `x-session-id`; `App.tsx`
 renders the 4-step flow from the context snapshot; panels map 1:1 to the flow stages.
 `AuthoringPanel` loads Embedding API v3 and renders `<tableau-authoring-viz>` with the
-optional JWT. `SetupPanel` hosts the **Build datasource** connector switch (`SalesforceBuild`,
-`ExcelBuild`, `BigQueryBuild`, `DataCloudBuild`, `SnowflakeBuild`). `SnowflakeBuild` is a
-4-step wizard (Connect → Warehouse/Database/Schema → Model → Publish) with a Live/Extract
-radio; it calls `api.snowflakePublish({ tables, relationships, mode, materialization, ... })`. Styles for
-the builders live in `app/styles.css` (`.sf*`, `.segmented`, `.switch`, `.tablecard`, `.joinrow`).
+optional JWT. `SetupPanel` hosts **Use Published datasource** (folder → datasources in
+that folder) and **Build datasource** (`SalesforceBuild`, `ExcelBuild`, `BigQueryBuild`,
+`DataCloudBuild`, `SnowflakeBuild`; picker starts at **Select the connector**). Salesforce,
+BigQuery, Data Cloud, and Snowflake connect forms stay visible and expose **Save Creds in
+Vault** / **Use Saved Creds** (Excel does not). `SnowflakeBuild` is a 4-step wizard
+(Connect → Warehouse/Database/Schema → Model → Publish) with a Live/Extract radio; it
+calls `api.snowflakePublish({ tables, relationships, mode, materialization, ... })`.
+`App.tsx` keeps a Vault header **Show Vault** / **Hide Vault** (`showVault`, default
+hidden after Tableau credentials are saved) plus topbar **Hide/Show dashboard**. Styles for
+the builders live in `app/styles.css` (`.sf*`,
+`.segmented`, `.switch`, `.tablecard`, `.joinrow`).
 
 **Theme & UX (light "Tableau" look).** `app/styles.css` is a light theme driven entirely by
 `:root` CSS variables (`--bg/--panel/--panel-2/--border/--text/--muted` neutrals + Tableau

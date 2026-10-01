@@ -1,7 +1,7 @@
 # Build Plan (Phases) — TableauPilot AI
 
 > Living document. Update the status + "done" criteria whenever a phase changes. Last
-> updated: 2026-09-30.
+> updated: 2026-10-01.
 
 Status legend: ✅ done · 🚧 in progress · ⬜ not started.
 
@@ -21,7 +21,7 @@ Status legend: ✅ done · 🚧 in progress · ⬜ not started.
 ## Phase 2 — Vault (credentials & sessions) ✅
 **Produces:** `src/vault/{crypto,types,store,session,vault}.ts`.
 **Done when:** register/unlock with 6-digit PIN; AES-256-GCM at rest; lockout;
-save + PIN-gated update; `resetTableauState` on update; session sweeper.
+save + PIN-gated update/delete; `resetTableauState` on update/delete; session sweeper.
 
 ## Phase 3 — Tableau connectivity ✅
 **Produces:** `src/tableau/{tableauClient,auth,discovery,datasources,permissions}.ts`
@@ -67,8 +67,13 @@ boundary; `requireSession`; prod SPA serving.
 
 ## Phase 10 — Frontend UX ✅
 **Produces:** `app/*` (`App.tsx`, `api.ts`, panels, `styles.css`, `types.ts`).
-**Done when:** 4-step flow renders from context snapshot; connection/credentials/setup/
-plan/authoring panels; only session id stored client-side; real Embedding API v3 embed.
+**Done when:** 4-step flow renders from context snapshot; vault identity + left-top
+Vault (Tableau save/edit/delete; compact connector summaries; header **Show Vault** /
+**Hide Vault**, body hidden by default after Tableau credentials are saved) then
+setup/plan/authoring; Connect & lock keeps Published vs Build; published datasources
+filtered to the selected folder; Build picker starts at **Select the connector**;
+connector connect forms stay visible with **Save Creds in Vault** / **Use Saved Creds**
+(except Excel); only session id stored client-side; real Embedding API v3 embed.
 
 ## Phase 11 — Embed ✅
 **Produces:** `app/components/AuthoringPanel.tsx`, `getEmbedInfo` + `/api/embed/info`.
@@ -135,19 +140,20 @@ extract builds work; **233 tests** (231 passing in-sandbox; 2 real-Hyper tests n
 additive code).
 
 ## Phase 18 — Salesforce Data Cloud connector: live + extract datasource builder ✅
-**Produces:** `src/datacloud/client.ts` (SOAP login via imported Salesforce.login + CDP token
-+ data spaces/objects/query), `src/tableau/authoring/dataCloudTdsGenerator.ts` (single /
+**Produces:** `src/datacloud/client.ts` (OAuth with CDP scopes via `oauth.ts` / `oauthStore.ts`,
+or SOAP login via imported Salesforce.login, then CDP token + data spaces/objects/query),
+`src/tableau/authoring/dataCloudTdsGenerator.ts` (single /
 relationships / physical-join `.tds`, live or extract, `class='salesforce-genie'` OAuth
 connection, reconciled with `reference/DataCloud{Live,Extract}DS.tds`),
-`TableauService.{dataCloudConnect,dataCloudListDataSpaces,dataCloudListObjects,dataCloudDescribeObject,buildAndPublishDataCloudDatasource}`,
+`TableauService.{dataCloudOauthStart,completeDataCloudOauth,dataCloudConnect,dataCloudListDataSpaces,dataCloudListObjects,dataCloudDescribeObject,buildAndPublishDataCloudDatasource}`,
 `/api/connectors/datacloud/*` routes, `app/components/DataCloudBuild.tsx` + the connector
 dropdown, and `app/api.ts` `dataCloud*` methods.
-**Done when:** SOAP login → pick Data Space → object category → model one/many (relationship or
-join, identical UI) → choose Live or Extract → generate `.tds` (+ `.hyper`/`.tdsx` for extract)
-→ publish (embed Data Cloud OAuth cred; refresh on extract only) → lock + converge on the normal
-dashboard flow. Single-/multi-object + live/extract builds work; **258 tests** (256 passing
-in-sandbox; 2 real-Hyper tests need `.venv-hyper`); `tsc`/lint clean.
-**No Salesforce, Excel, or BigQuery connector logic changed** (only additive code).
+**Done when:** Sign in with Salesforce (OAuth + CDP scopes; SOAP fallback) → pick Data Space →
+object category → model one/many (relationship or join, identical UI) → choose Live or Extract →
+generate `.tds` (+ `.hyper`/`.tdsx` for extract) → publish (embed Data Cloud OAuth cred; refresh
+on extract only) → lock + converge on the normal dashboard flow. Single-/multi-object + live/
+extract builds work; **288 tests** (286 passing in-sandbox; 2 real-Hyper tests need
+`.venv-hyper`); `tsc`/lint clean.
 
 ## Phase 19 — Snowflake connector: live + extract datasource builder ✅
 **Produces:** `src/snowflake/client.ts` (session login + SHOW/DESCRIBE/SELECT),
@@ -161,7 +167,7 @@ dropdown, and `app/api.ts` `snowflake*` methods.
 (relationship or join, identical UI) → choose Live or Extract → generate `.tds` (+
 `.hyper`/`.tdsx` for extract) → publish (embed username/password; refresh on extract only) →
 lock + converge on the normal dashboard flow. Single-/multi-table + live/extract builds work;
-**284 tests** (282 passing in-sandbox; 2 real-Hyper tests need unsandboxed Hyper); `tsc`/lint clean.
+**297 tests** (295 passing in-sandbox; 2 real-Hyper tests need unsandboxed Hyper); `tsc`/lint clean.
 **No Salesforce, Excel, BigQuery, or Data Cloud connector logic changed** (only additive code).
 
 ---

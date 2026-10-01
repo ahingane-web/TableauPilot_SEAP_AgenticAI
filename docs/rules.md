@@ -1,7 +1,7 @@
 # Engineering & AI Rules — TableauPilot AI
 
 > **Binding** rules for anyone (human or AI) working in this repo. Update this whenever
-> an invariant, convention, or constraint changes. Last updated: 2026-09-30.
+> an invariant, convention, or constraint changes. Last updated: 2026-10-01.
 
 ## 1. Tech to use / avoid
 
@@ -45,19 +45,24 @@
    calls Tableau directly. (Salesforce HTTP — SOAP login, REST describe/query, OAuth —
    is isolated in `src/salesforce/*`; BigQuery HTTP — Google OAuth + BigQuery/Cloud
    Resource Manager REST — is isolated in `src/bigquery/*`; Data Cloud HTTP — CDP token
-   exchange, data spaces, metadata, Query API — is isolated in `src/datacloud/*` and
+   exchange, data spaces, metadata, Query API, plus an OAuth wrapper that builds the
+   authorize URL with `api cdp_query_api` (`display=popup`, no `prompt=login`) using
+   Salesforce PKCE helpers without editing `src/salesforce/oauth.ts`
+   internals — is isolated in `src/datacloud/*` and
    **imports** Salesforce `login` without modifying it; Snowflake HTTP — session login +
    SHOW/DESCRIBE/SELECT — is isolated in `src/snowflake/*`; none of these talk to Tableau.)
-9. **Connector source credentials (tokens) are never persisted.** Salesforce creds, the
-   Google BigQuery OAuth **access/refresh token**, the Data Cloud SOAP session + CDP
-   token, and the Snowflake session token + password are held transiently in-memory
+9. **Connector session tokens are never persisted.** Live Salesforce SOAP/OAuth sessions,
+   the Google BigQuery OAuth **access/refresh token**, the Data Cloud OAuth/SOAP session +
+   CDP token, and the Snowflake **session token** are held transiently in-memory
    (`session.connectors.{salesforce,bigquery,datacloud,snowflake}`
    + the short-lived pending-OAuth state) only to read schema/data (and, for extracts, to
    build the local `.hyper`), then cleared after publish.
-   The BigQuery OAuth **client** id/secret (the app-registration credential, NOT a user token —
-   analogous to the Tableau Connected App secret) may be supplied in the UI and optionally saved
-   **encrypted in the user's vault** (`TableauCredentials.bigQueryOAuth`) so it need not be
-   re-entered; `GOOGLE_OAUTH_*` is an optional server-wide fallback. The signed-in Google email is
+   **Login materials** may be saved encrypted in the user's PIN vault (same blob as the
+   Tableau PAT) so they can be reused: Salesforce username/password, Data Cloud My Domain +
+   Connected App (and optional SOAP), Snowflake username/password, and the BigQuery OAuth
+   **client** id/secret (`TableauCredentials.{salesforce,dataCloud,snowflake,bigQueryOAuth}`).
+   Secrets never return to the browser — only a `CredentialSummary`. `GOOGLE_OAUTH_*` /
+   `SALESFORCE_OAUTH_*` remain optional server-wide fallbacks. The signed-in Google email is
    fetched from OpenID `userinfo` (never asked of the user) and used as the connection username +
    Tableau saved-credential match. No user secret is ever written to `.env`, the browser, or logs.
    Published Salesforce / BigQuery / Data Cloud datasources authenticate via the saved OAuth
@@ -166,6 +171,10 @@
   Tableau quirks). Match the existing comment style.
 - Keep the redacting logger + `AppError` patterns; don't introduce ad-hoc logging.
 - Tests accompany non-trivial logic; **do not** add a test just to test a trivial edit.
+- **Vault UI:** Tableau save/edit/delete stays in `CredentialsPanel`; connector logins
+  are typed on Build connect forms (**Save Creds in Vault** / **Use Saved Creds**). The
+  Vault body is hidden by default after Tableau credentials exist (**Show Vault** in the
+  panel header, not the top bar). Do not auto-hide connect forms when a login is vaulted.
 - **Keep `npm run typecheck`, `npm run lint`, `npm test`, `npm run build` green.**
 
 ## 7. Documentation rule (ALL Markdown docs)

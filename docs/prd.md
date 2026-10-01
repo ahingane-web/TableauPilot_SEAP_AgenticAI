@@ -1,7 +1,7 @@
 # PRD — TableauPilot AI
 
 > Living document. Update this whenever product scope, requirements, or success
-> criteria change. Last updated: 2026-09-30.
+> criteria change. Last updated: 2026-10-01.
 
 ## 1. Summary
 
@@ -40,7 +40,8 @@ editor and never claims success it cannot verify.
 - **No pixel-perfect fidelity claim.** Generated workbooks are best-effort scaffolds to
   be finished in the real embed.
 - **TypeScript/Node.js**, with one narrow exception: a Python Hyper API sidecar used
-  solely to materialize Salesforce `.hyper` extracts (see
+  solely to materialize `.hyper` extracts for Build-datasource connectors (Salesforce,
+  Excel, and BigQuery / Data Cloud / Snowflake **Extract** mode — see
   [python-dependency-decision.md](./python-dependency-decision.md)).
 - **No storing user Tableau secrets in `.env`** or in the browser/localStorage.
 - **No multi-tenant billing / user management** beyond the local vault (out of scope for
@@ -58,9 +59,17 @@ editor and never claims success it cannot verify.
 ## 5. Core user flows
 
 1. **Vault onboarding.** Register username + 6-digit PIN → save Tableau credentials
-   (cloud URL, site, PAT, optional Connected App). Returning users **unlock** with PIN.
-2. **Connect & lock.** Connect to Tableau Cloud (PAT sign-in) → pick **target project**
-   → pick and **lock** a published datasource (immutable for the session).
+   (cloud URL, site, PAT, optional Connected App) in the left-top **Vault** (required
+   for Connect to Tableau Cloud). Connector logins are saved from the **connect forms**
+   (**Save Creds in Vault** / **Use Saved Creds**), not by re-typing passwords in Vault.
+   Vault shows compact connector summaries (saved / not saved, non-secret fields, PIN
+   delete). The Vault header stays visible with **Show Vault** / **Hide Vault** (body
+   hidden by default after Tableau credentials are saved). Returning
+   users **unlock** with PIN. Tableau credentials can be edited or deleted (PIN-gated);
+   Tableau delete clears the whole blob but keeps the vault user.
+2. **Connect & lock.** Connect to Tableau Cloud (PAT sign-in) → pick **target project
+   (folder)** → **Use Published datasource** (datasources in that folder, then Lock) or
+   **Build datasource** (pick a connector — default **Select the connector**) → lock.
 3. **Plan.** Describe the dashboard → agent inspects the locked datasource's real fields
    → returns a Zod-validated `DashboardPlan` → field validation vs live metadata.
 4. **Approve.** Review the plan; **approve** by its hash (integrity gate).
@@ -93,14 +102,15 @@ after publish). Both embed the signed-in account's saved BigQuery OAuth credenti
 project/project/dataset > select table(s) > Relationship or Join > Live or Extract > publish`.
 
 **Alternate flow — Salesforce Data Cloud data source builder.** Pick the **Salesforce Data Cloud**
-connector and sign in with the **same username/password form** as Salesforce (org URL, username,
-password, optional security token). Choose a **Data Space** and an **object type** (Data Model
+connector and **sign in with Salesforce** in a browser OAuth popup (Connected App with CDP
+scopes). Password SOAP login remains as a fallback (often fails Data Cloud token exchange).
+Choose a **Data Space** and an **object type** (Data Model
 Objects, Data Lake Objects, Calculated Insights, or All); the space's **objects** appear as the
 "objects" for the SAME modeling step (relationships or joins). Choose **Live** (Tableau queries
 Data Cloud directly over OAuth) or **Extract** (rows are materialized into a bundled `.hyper` and
 refreshed on Tableau Cloud after publish). Both embed the publisher's saved Salesforce Data Cloud
 OAuth credential. Flow:
-`Build datasource > select connector > Salesforce Data Cloud > connect > pick data space and
+`Build datasource > select connector > Salesforce Data Cloud > Sign in with Salesforce > pick data space and
 object type > select object(s) > Relationship or Join > Live or Extract > publish`.
 
 **Alternate flow — Snowflake data source builder.** Pick the **Snowflake** connector and sign
@@ -116,7 +126,17 @@ select table(s) > Relationship or Join > Live or Extract > publish`.
 ## 6. Functional requirements
 
 - **FR1 Vault.** Register/unlock with username + 6-digit PIN; AES-256-GCM at rest;
-  lockout after N failed attempts; save + PIN-gated update of credentials; logout.
+  lockout after N failed attempts; save + PIN-gated update/delete of Tableau credentials;
+  optional connector logins (Salesforce, BigQuery OAuth client, Data Cloud, Snowflake;
+  not Excel) saved from the connect forms and summarized in Vault; logout. After Tableau
+  delete the session stays unlocked (`hasCredentials` false) so the Vault panel can
+  collect a new blob without re-registering. Connect & lock keeps **Use Published
+  datasource** | **Build datasource** (default published). Published lists only
+  datasources in the selected project folder. Build starts with **Select the connector**
+  (no default). Connector login fields stay visible; **Save Creds in Vault** and
+  **Use Saved Creds** sit next to Connect (Excel has neither). The Vault panel can be
+  shown or hidden from the Vault header (**Show Vault**, default hidden once Tableau
+  credentials are saved) without unmounting Setup/Plan when `hasCredentials` is true.
 - **FR2 Connectivity.** PAT sign-in to Tableau Cloud; token cached ≤55 min; URL
   normalization to the pod origin.
 - **FR3 Discovery.** List projects/datasources/workbooks/views (pagination-aware).
@@ -160,15 +180,16 @@ select table(s) > Relationship or Join > Live or Extract > publish`.
   server-side refresh. Both embed the signed-in account's saved BigQuery OAuth credential
   (matched by email). BigQuery column names (which may contain spaces/hyphens) are kept as the
   connection `remote-name` with disambiguated local names. No Salesforce/Excel logic is altered.
-- **FR16 Salesforce Data Cloud connector.** Sign in with **Salesforce username/password** (SOAP
-  login, then CDP token exchange); list data spaces and objects by category (DMO / DLO /
+- **FR16 Salesforce Data Cloud connector.** Sign in with **Salesforce browser OAuth** (CDP
+  scopes `api`, `cdp_query_api`; SOAP username/password is
+  a fallback); list data spaces and objects by category (DMO / DLO /
   Calculated Insights / All); model one or more objects as **relationships** or a **physical
   join**; choose **Live** or **Extract**. Live publishes a bare `class='salesforce-genie'` OAuth
   `.tds` (Tableau queries Data Cloud directly); Extract queries rows, materializes a local
   `.hyper` (Python sidecar) + `.tdsx`, publishes it, and triggers a server-side refresh. Both
   embed the publisher's saved Salesforce Data Cloud OAuth credential (matched by username). Field
   API names are kept as the connection `remote-name` with disambiguated local names. Nested
-  fields are skipped. No Salesforce CRM / Excel / BigQuery logic is altered.
+  fields are skipped. Salesforce `oauth.ts` internals are unchanged (scopes passed in).
 - **FR17 Snowflake connector.** Sign in with **Snowflake username/password** (server URL +
   warehouse); list warehouses, databases, schemas, and tables; model one or more tables as
   **relationships** or a **physical join**; choose **Live** or **Extract**. Live publishes a

@@ -16,6 +16,7 @@ import type { ExcelSheet } from '../excel/excelClient.js';
 import type { SnowflakeAuth, SnowflakeCredentials } from '../snowflake/client.js';
 import { sweepPendingOauth } from '../salesforce/oauthStore.js';
 import { sweepPendingBigQueryOauth } from '../bigquery/oauthStore.js';
+import { sweepPendingDataCloudOauth } from '../datacloud/oauthStore.js';
 import type { DatasourceMetadata } from '../tableau/types.js';
 import type { TableauCredentials } from './types.js';
 
@@ -70,9 +71,9 @@ export interface ConnectorState {
     clientSecret?: string;
   };
   /**
-   * Transient Salesforce Data Cloud (Genie) state. Core SOAP session + CDP token are
-   * memory-only, used to list data spaces/objects and (for extracts) query rows, then
-   * cleared after publish. Never persisted, logged, or sent to the client.
+   * Transient Salesforce Data Cloud (Genie) state. Core SOAP or OAuth session + CDP
+   * token are memory-only, used to list data spaces/objects and (for extracts) query
+   * rows, then cleared after publish. Never persisted, logged, or sent to the client.
    */
   datacloud?: {
     creds: SalesforceCredentials;
@@ -205,6 +206,7 @@ export function startSessionSweeper(intervalMs = 60_000): () => void {
     }
     sweepPendingOauth();
     sweepPendingBigQueryOauth();
+    sweepPendingDataCloudOauth();
   }, intervalMs);
   handle.unref?.();
   return () => clearInterval(handle);

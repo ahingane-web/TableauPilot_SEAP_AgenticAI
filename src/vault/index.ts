@@ -8,5 +8,11 @@ export {
   startSessionSweeper,
 } from './session.js';
 export type { Session, FlowContext, TableauAuthState } from './session.js';
-export type { TableauCredentials, CredentialSummary } from './types.js';
+export type {
+  TableauCredentials,
+  CredentialSummary,
+  VaultSalesforceLogin,
+  VaultDataCloudLogin,
+  VaultSnowflakeLogin,
+} from './types.js';
 export { summarizeCredentials } from './types.js';

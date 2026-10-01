@@ -18,6 +18,21 @@ export interface CredentialSummary {
   hasBigQueryOAuth: boolean;
   bigQueryOAuthClientId?: string;
   bigQueryOAuthHasSecret?: boolean;
+  hasSalesforce: boolean;
+  salesforceUrl?: string;
+  salesforceUsername?: string;
+  salesforceHasPassword?: boolean;
+  hasDataCloud: boolean;
+  dataCloudUrl?: string;
+  dataCloudClientId?: string;
+  dataCloudHasClientSecret?: boolean;
+  dataCloudUsername?: string;
+  dataCloudHasPassword?: boolean;
+  hasSnowflake: boolean;
+  snowflakeUrl?: string;
+  snowflakeWarehouse?: string;
+  snowflakeUsername?: string;
+  snowflakeHasPassword?: boolean;
 }
 
 export interface SessionContext {

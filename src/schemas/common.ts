@@ -529,12 +529,26 @@ export const DataCloudRelationshipSchema = z.object({
 export type DataCloudRelationship = z.infer<typeof DataCloudRelationshipSchema>;
 
 /**
+ * Data Cloud source credentials. Password is optional because browser OAuth (Sign in
+ * with Salesforce) stores an empty password on the session; SOAP password-login still
+ * sends a password. Distinct from {@link SalesforceCredentialsSchema} (password required).
+ */
+export const DataCloudCredentialsSchema = z.object({
+  url: z.string().min(1),
+  username: z.string().min(1),
+  password: z.string().optional().default(''),
+  token: z.string().optional(),
+});
+export type DataCloudCredentialsInput = z.infer<typeof DataCloudCredentialsSchema>;
+
+/**
  * Payload for building a Data Cloud datasource (live or extract). `tables` are object API
- * names in the selected data space. Connectivity rules match {@link SalesforceBuildSchema}.
+ * names in the selected data space. Connectivity rules match {@link SalesforceBuildSchema}
+ * except credentials may omit a password after OAuth sign-in.
  */
 export const DataCloudBuildSchema = z
   .object({
-    credentials: SalesforceCredentialsSchema,
+    credentials: DataCloudCredentialsSchema,
     dataSpace: DataCloudDataSpaceSchema,
     category: DataCloudObjectCategorySchema.default('all'),
     tables: z.array(DataCloudObjectNameSchema).min(1, 'Select at least one Data Cloud object'),

@@ -130,3 +130,167 @@ describe('editing credentials requires the PIN', () => {
     expect(summary).not.toHaveProperty('patSecret');
   });
 });
+
+describe('deleting credentials requires the PIN', () => {
+  it('deletes credentials with the correct PIN, keeps the vault user, and resets live state', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '246810');
+    const session = getSession(reg.sessionId)!;
+    VaultService.saveCredentials(session, creds);
+    session.tableauAuth = {
+      token: 'live-token',
+      siteId: 'site',
+      siteContentUrl: 'mysite',
+      userId: 'u',
+      serverUrl: 'https://x',
+      signedInAt: Date.now(),
+    };
+    session.flow.datasourceLock = {
+      datasourceId: 'd',
+      datasourceName: 'DS',
+      siteId: 'site',
+      lockedAt: new Date().toISOString(),
+    };
+    session.connectors = {};
+
+    VaultService.deleteCredentials(session, '246810');
+
+    expect(VaultService.getCredentialSummary(session)).toBeNull();
+    expect(session.credentials).toBeUndefined();
+    expect(session.connectors).toBeUndefined();
+    expect(session.tableauAuth).toBeUndefined();
+    expect(session.flow.datasourceLock).toBeUndefined();
+    expect(() => VaultService.getCredentials(session)).toThrow(/no tableau credentials/i);
+
+    VaultService.logout(reg.sessionId);
+    const re = VaultService.unlock(username, '246810');
+    expect(re.hasCredentials).toBe(false);
+    expect(getSession(re.sessionId)!.credentials).toBeUndefined();
+  });
+
+  it('rejects a credential delete with the wrong PIN and leaves creds unchanged', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '135790');
+    const session = getSession(reg.sessionId)!;
+    VaultService.saveCredentials(session, creds);
+
+    expect(() => VaultService.deleteCredentials(session, '000000')).toThrow(/incorrect pin/i);
+    expect(VaultService.getCredentials(session).patName).toBe('pilot');
+  });
+
+  it('allows saving credentials again after a PIN-gated delete', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '998877');
+    const session = getSession(reg.sessionId)!;
+    VaultService.saveCredentials(session, creds);
+    VaultService.deleteCredentials(session, '998877');
+    const summary = VaultService.saveCredentials(session, { ...creds, patName: 're-saved' });
+    expect(summary.patName).toBe('re-saved');
+    expect(VaultService.getCredentials(session).patSecret).toBe('super-secret-pat-value');
+  });
+});
+
+describe('vault connector login sections', () => {
+  function sessionWithTableau() {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '121212');
+    const session = getSession(reg.sessionId)!;
+    VaultService.saveCredentials(session, creds);
+    return { username, session, pin: '121212' };
+  }
+
+  it('refuses connector logins until Tableau credentials are saved', () => {
+    const username = uniqueUser();
+    const reg = VaultService.register(username, '343434');
+    const session = getSession(reg.sessionId)!;
+    expect(() =>
+      VaultService.saveSalesforceAccount(session, {
+        url: 'https://login.salesforce.com',
+        username: 'a@b.com',
+        password: 'pw',
+      }),
+    ).toThrow(/tableau connection details first/i);
+  });
+
+  it('saves Salesforce login, hides secrets in the summary, and merges omitted passwords', () => {
+    const { session } = sessionWithTableau();
+    const summary = VaultService.saveSalesforceAccount(session, {
+      url: 'https://login.salesforce.com',
+      username: 'a@b.com',
+      password: 'sf-secret',
+      token: 'tok',
+    });
+    expect(summary.hasSalesforce).toBe(true);
+    expect(summary.salesforceUsername).toBe('a@b.com');
+    expect(summary).not.toHaveProperty('password');
+    expect(VaultService.getSalesforceAccount(session)?.password).toBe('sf-secret');
+
+    const merged = VaultService.mergeSalesforceLogin(session, {});
+    expect(merged.password).toBe('sf-secret');
+    expect(merged.username).toBe('a@b.com');
+    const override = VaultService.mergeSalesforceLogin(session, { password: 'other' });
+    expect(override.password).toBe('other');
+  });
+
+  it('keeps Salesforce login when Tableau PAT is updated', () => {
+    const { session, pin } = sessionWithTableau();
+    VaultService.saveSalesforceAccount(session, {
+      url: 'https://login.salesforce.com',
+      username: 'a@b.com',
+      password: 'sf-secret',
+    });
+    VaultService.updateCredentials(session, pin, { ...creds, patName: 'rotated' });
+    expect(VaultService.getSalesforceAccount(session)?.password).toBe('sf-secret');
+    expect(VaultService.getCredentials(session).patName).toBe('rotated');
+  });
+
+  it('PIN-deletes Salesforce only and rejects a bad PIN', () => {
+    const { session, pin } = sessionWithTableau();
+    VaultService.saveSalesforceAccount(session, {
+      url: 'https://login.salesforce.com',
+      username: 'a@b.com',
+      password: 'sf-secret',
+    });
+    expect(() => VaultService.deleteSalesforceAccount(session, '000000')).toThrow(/incorrect pin/i);
+    expect(VaultService.getSalesforceAccount(session)?.username).toBe('a@b.com');
+    VaultService.deleteSalesforceAccount(session, pin);
+    expect(VaultService.getSalesforceAccount(session)).toBeUndefined();
+    expect(VaultService.getCredentials(session).patName).toBe('pilot');
+  });
+
+  it('saves Data Cloud and Snowflake logins independently', () => {
+    const { session, pin } = sessionWithTableau();
+    const dc = VaultService.saveDataCloudAccount(session, {
+      url: 'https://org.my.salesforce.com',
+      clientId: 'cid',
+      clientSecret: 'csec',
+    });
+    expect(dc.hasDataCloud).toBe(true);
+    expect(dc.dataCloudClientId).toBe('cid');
+    expect(dc).not.toHaveProperty('clientSecret');
+
+    const sn = VaultService.saveSnowflakeAccount(session, {
+      url: 'xy12345.snowflakecomputing.com',
+      warehouse: 'COMPUTE_WH',
+      username: 'sfuser',
+      password: 'snow-secret',
+    });
+    expect(sn.hasSnowflake).toBe(true);
+    expect(sn.snowflakeWarehouse).toBe('COMPUTE_WH');
+    expect(VaultService.mergeSnowflakeLogin(session, {}).password).toBe('snow-secret');
+
+    VaultService.deleteDataCloudAccount(session, pin);
+    expect(VaultService.getDataCloudAccount(session)).toBeUndefined();
+    expect(VaultService.getSnowflakeAccount(session)?.username).toBe('sfuser');
+  });
+
+  it('PIN-deletes the BigQuery OAuth client without wiping Tableau', () => {
+    const { session, pin } = sessionWithTableau();
+    VaultService.saveBigQueryOAuthClient(session, { clientId: 'bq-client', clientSecret: 'bq-secret' });
+    expect(VaultService.getBigQueryOAuthClient(session).clientId).toBe('bq-client');
+    expect(() => VaultService.deleteBigQueryOAuthClient(session, '000000')).toThrow(/incorrect pin/i);
+    VaultService.deleteBigQueryOAuthClient(session, pin);
+    expect(VaultService.getBigQueryOAuthClient(session).clientId).toBeUndefined();
+    expect(VaultService.getCredentials(session).patSecret).toBe('super-secret-pat-value');
+  });
+});

@@ -1,6 +1,6 @@
 # Authoring Limitations (Category C) — read this
 
-> Living document. Last updated: 2026-09-30.
+> Living document. Last updated: 2026-10-01.
 
 TableauPilot is built to be **truthful about capability boundaries**. This document
 states exactly what the automated pipeline does and does not guarantee.
@@ -8,7 +8,8 @@ states exactly what the automated pipeline does and does not guarantee.
 ## What the automated pipeline guarantees
 
 - A **real workbook is created** in your Tableau Cloud site, in the **exact project**
-  you approved, connected to the **locked published datasource**.
+  you approved, connected to the **locked published datasource** (an existing datasource
+  in that project folder, or one just built from a connector).
 - Its existence, project, views, connected datasource, and URL are **verified via the
   REST API** before any success is reported. URLs are taken from Tableau responses —
   never guessed.
@@ -118,8 +119,10 @@ Honest boundaries:
 - **Unsupported column types are skipped.** Nested/complex/CI-only field shapes are not modeled
   (scalar columns only). Real field API names are preserved as the connection `remote-name` with
   disambiguated local names.
-- **Data Cloud must be enabled.** CDP token exchange and metadata URLs vary slightly by org;
-  if Data Cloud is not provisioned for the user, the connector surfaces a `CONNECTOR_API` error.
+- **Data Cloud must be enabled, and a360 needs an OAuth token with CDP scopes.** SOAP
+  session ids often fail `POST /services/a360/token` (HTTP 500). Sign in with Salesforce
+  (Connected App scopes include `cdp_query_api`). If Data Cloud is not provisioned for the
+  user, the connector surfaces a `CONNECTOR_API` error.
 
 ## Snowflake datasources — honest scope
 

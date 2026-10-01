@@ -107,6 +107,8 @@ import * as BigQuery from '../bigquery/client.js';
 import type { BigQueryField } from '../bigquery/client.js';
 import * as DataCloud from '../datacloud/client.js';
 import type { DataCloudAuth, DataCloudField, DataCloudObjectCategory } from '../datacloud/client.js';
+import * as DataCloudOauth from '../datacloud/oauth.js';
+import { putPendingDataCloudOauth, takePendingDataCloudOauth } from '../datacloud/oauthStore.js';
 import * as Snowflake from '../snowflake/client.js';
 import type { SnowflakeAuth, SnowflakeCredentials, SnowflakeField } from '../snowflake/client.js';
 import * as BigQueryOauth from '../bigquery/oauth.js';
@@ -1540,7 +1542,8 @@ export const TableauService = {
   /**
    * Connect to Salesforce Data Cloud: SOAP login (imported Salesforce.login) + CDP token
    * exchange. The live sessions are stored transiently on the session so subsequent list /
-   * describe / publish calls can use them. Nothing is logged.
+   * describe / publish calls can use them. Prefer {@link dataCloudOauthStart} on orgs
+   * where SOAP SIDs fail the a360 exchange. Nothing is logged.
    */
   async dataCloudConnect(session: Session, creds: SalesforceCredentials): Promise<{ connected: true }> {
     requireAuth(session);
@@ -1550,6 +1553,83 @@ export const TableauService = {
       datacloud: { creds, sfSession, cdp },
     };
     return { connected: true };
+  },
+
+  /**
+   * Begin Data Cloud browser OAuth (PKCE + CDP scopes). Returns the authorize URL and
+   * the callback URI that must already be registered on the Connected App (same URI as
+   * Salesforce CRM OAuth by default). Client id/secret come from the UI or
+   * `SALESFORCE_OAUTH_*`.
+   */
+  dataCloudOauthStart(
+    session: Session,
+    input: { url: string; clientId?: string; clientSecret?: string },
+  ): { authUrl: string; redirectUri: string } {
+    requireAuth(session);
+    const cfg = getConfig().salesforce;
+    const clientId = input.clientId || cfg.oauthClientId;
+    const clientSecret = input.clientSecret || cfg.oauthClientSecret;
+    if (!clientId) {
+      throw new AppError(
+        'CONNECTOR_API',
+        'Data Cloud sign-in needs a Connected App consumer key. Paste it in the form (or set SALESFORCE_OAUTH_CLIENT_ID).',
+      );
+    }
+    const redirectUri = cfg.oauthRedirectUri;
+    const state = DataCloudOauth.generateState();
+    const pkce = DataCloudOauth.generatePkce();
+    putPendingDataCloudOauth(state, {
+      sessionId: session.id,
+      loginUrl: input.url,
+      clientId,
+      clientSecret,
+      redirectUri,
+      codeVerifier: pkce.verifier,
+    });
+    const authUrl = DataCloudOauth.buildAuthorizeUrl({
+      loginUrl: input.url,
+      clientId,
+      redirectUri,
+      state,
+      codeChallenge: pkce.challenge,
+    });
+    return { authUrl, redirectUri };
+  },
+
+  /**
+   * Complete Data Cloud OAuth if `state` was issued by {@link dataCloudOauthStart}.
+   * Returns null when the state belongs to Salesforce CRM OAuth (caller should fall
+   * through). Exchanges the code, then a360, and stores `session.connectors.datacloud`.
+   */
+  async completeDataCloudOauth(
+    params: { code: string; state: string },
+  ): Promise<{ sessionId: string; username: string } | null> {
+    const pending = takePendingDataCloudOauth(params.state);
+    if (!pending) return null;
+    const session = getSession(pending.sessionId);
+    if (!session) {
+      throw new AppError('AUTH_REQUIRED', 'Your session expired during Data Cloud sign-in. Unlock your vault and retry.');
+    }
+    const token = await DataCloudOauth.exchangeCodeForToken({
+      loginUrl: pending.loginUrl,
+      clientId: pending.clientId,
+      clientSecret: pending.clientSecret,
+      redirectUri: pending.redirectUri,
+      code: params.code,
+      codeVerifier: pending.codeVerifier,
+    });
+    const { username } = await DataCloudOauth.fetchUserInfo(token);
+    if (!username) {
+      throw new AppError('AUTH_FAILED', 'Salesforce OAuth succeeded but did not return a username.');
+    }
+    const sfSession = await DataCloudOauth.sessionFromToken(token);
+    const { cdp } = await DataCloud.connectWithOauthSession(sfSession);
+    const creds: SalesforceCredentials = { url: pending.loginUrl, username, password: '' };
+    session.connectors = {
+      ...(session.connectors ?? {}),
+      datacloud: { creds, sfSession, cdp },
+    };
+    return { sessionId: session.id, username };
   },
 
   /** List Data Cloud data spaces visible to the signed-in user. */
@@ -1621,6 +1701,9 @@ export const TableauService = {
     requireAuth(session);
     let dc = session.connectors?.datacloud;
     if (!dc?.cdp?.accessToken) {
+      if (!input.credentials.password) {
+        throw new AppError('AUTH_REQUIRED', 'Sign in to Salesforce Data Cloud before publishing.');
+      }
       const connected = await DataCloud.connect(input.credentials);
       dc = { creds: input.credentials, sfSession: connected.sfSession, cdp: connected.cdp };
       session.connectors = { ...(session.connectors ?? {}), datacloud: dc };

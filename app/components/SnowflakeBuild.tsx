@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
-import type { NamedItem } from '../types';
+import type { CredentialSummary, NamedItem } from '../types';
 import { Busy } from './common';
 import { DataModelBuilder, type DataModel } from './DataModelBuilder';
 
@@ -18,6 +18,8 @@ export function SnowflakeBuild({
   setBusy,
   projects,
   onPublished,
+  vaultSummary,
+  onVaultSaved,
 }: {
   busy: string | null;
   setBusy: (v: string | null) => void;
@@ -26,6 +28,8 @@ export function SnowflakeBuild({
     datasource: { name: string };
     extract?: { state?: 'succeeded' | 'failed' | 'cancelled' | 'pending'; message?: string };
   }) => Promise<void>;
+  vaultSummary: CredentialSummary | null;
+  onVaultSaved: () => Promise<void>;
 }): React.ReactElement {
   const [url, setUrl] = useState('');
   const [loginWarehouse, setLoginWarehouse] = useState('');
@@ -50,17 +54,74 @@ export function SnowflakeBuild({
   const [dsName, setDsName] = useState('');
   const [overwrite, setOverwrite] = useState(false);
   const [publishError, setPublishError] = useState<string | null>(null);
+  const [savingVault, setSavingVault] = useState(false);
+  const [vaultNotice, setVaultNotice] = useState<string | null>(null);
+  const vaultSaved = Boolean(vaultSummary?.hasSnowflake);
 
   async function connect(): Promise<void> {
     if (!url || !loginWarehouse || !username || !password) return;
     setConnecting(true);
     setConnectError(null);
+    setVaultNotice(null);
     try {
       const res = await api.snowflakeConnect({ url, warehouse: loginWarehouse, username, password });
       const listed = await api.snowflakeWarehouses();
       setWarehouses(listed.warehouses);
       setConnected(true);
       const preferred = (res.warehouse || loginWarehouse).trim();
+      const match = listed.warehouses.find((w) => w.name.toUpperCase() === preferred.toUpperCase());
+      setWarehouse(match?.name || preferred);
+      setDatabase('');
+      setSchema('');
+      setDatabases([]);
+      setSchemas([]);
+      setTables([]);
+      setModel({ objects: [], relationships: [], mode: 'relationship', valid: false });
+    } catch (e) {
+      setConnectError(e instanceof Error ? e.message : 'Could not connect to Snowflake.');
+      setConnected(false);
+      setWarehouses([]);
+      setDatabases([]);
+      setSchemas([]);
+      setTables([]);
+    } finally {
+      setConnecting(false);
+    }
+  }
+
+  async function saveCredsInVault(): Promise<void> {
+    if (!url || !loginWarehouse || !username || !password) {
+      setConnectError('Fill server URL, warehouse, username, and password to save.');
+      return;
+    }
+    setSavingVault(true);
+    setConnectError(null);
+    try {
+      await api.saveSnowflakeAccount({ url, warehouse: loginWarehouse, username, password });
+      await onVaultSaved();
+      setVaultNotice('Saved in Vault.');
+    } catch (e) {
+      setConnectError(e instanceof Error ? e.message : 'Could not save Snowflake credentials.');
+    } finally {
+      setSavingVault(false);
+    }
+  }
+
+  async function useSavedCreds(): Promise<void> {
+    if (!vaultSaved) return;
+    setUrl(vaultSummary?.snowflakeUrl ?? '');
+    setLoginWarehouse(vaultSummary?.snowflakeWarehouse ?? '');
+    setUsername(vaultSummary?.snowflakeUsername ?? '');
+    setPassword('');
+    setConnecting(true);
+    setConnectError(null);
+    setVaultNotice(null);
+    try {
+      const res = await api.snowflakeConnect({});
+      const listed = await api.snowflakeWarehouses();
+      setWarehouses(listed.warehouses);
+      setConnected(true);
+      const preferred = (res.warehouse || vaultSummary?.snowflakeWarehouse || '').trim();
       const match = listed.warehouses.find((w) => w.name.toUpperCase() === preferred.toUpperCase());
       setWarehouse(match?.name || preferred);
       setDatabase('');
@@ -173,7 +234,9 @@ export function SnowflakeBuild({
     setPublishError(null);
     try {
       const res = await api.snowflakePublish({
-        credentials: { url, warehouse: loginWarehouse, username, password },
+        credentials: password
+          ? { url, warehouse: loginWarehouse, username, password }
+          : {},
         warehouse,
         database,
         schema,
@@ -244,55 +307,67 @@ export function SnowflakeBuild({
           the LLM.
         </div>
         <div className="sf-grid">
-          <div className="full">
-            <label>Server URL</label>
-            <input
-              placeholder="xy12345.snowflakecomputing.com"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-            />
+            <div className="full">
+              <label>Server URL</label>
+              <input
+                placeholder="xy12345.snowflakecomputing.com"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+              />
+            </div>
+            <div className="full">
+              <label>Warehouse</label>
+              <input
+                placeholder="COMPUTE_WH"
+                autoComplete="off"
+                value={loginWarehouse}
+                onChange={(e) => setLoginWarehouse(e.target.value)}
+              />
+            </div>
+            <div>
+              <label>Username</label>
+              <input
+                placeholder="SNOWFLAKE_USER"
+                autoComplete="off"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            </div>
+            <div>
+              <label>Password</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
           </div>
-          <div className="full">
-            <label>Warehouse</label>
-            <input
-              placeholder="COMPUTE_WH"
-              autoComplete="off"
-              value={loginWarehouse}
-              onChange={(e) => setLoginWarehouse(e.target.value)}
-            />
-          </div>
-          <div>
-            <label>Username</label>
-            <input
-              placeholder="SNOWFLAKE_USER"
-              autoComplete="off"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-            />
-          </div>
-          <div>
-            <label>Password</label>
-            <input
-              type="password"
-              autoComplete="new-password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-          </div>
-        </div>
-        <div className="row" style={{ marginTop: 12 }}>
+        <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
           <button
             className={connected ? 'secondary' : ''}
             onClick={connect}
-            disabled={!url || !loginWarehouse || !username || !password || connecting}
+            disabled={!url || !loginWarehouse || !username || !password || connecting || savingVault}
           >
             {connecting ? <Busy label="Connecting…" /> : connected ? 'Reconnect' : 'Connect to Snowflake'}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={saveCredsInVault}
+            disabled={!url || !loginWarehouse || !username || !password || connecting || savingVault}
+          >
+            {savingVault ? <Busy label="Saving…" /> : 'Save Creds in Vault'}
+          </button>
+          <button type="button" className="ghost" onClick={useSavedCreds} disabled={!vaultSaved || connecting || savingVault}>
+            Use Saved Creds
           </button>
           {!connected && !connectError ? (
             <span className="small muted">Opens a session so you can pick warehouse, database, schema, and tables.</span>
           ) : null}
         </div>
+        {vaultNotice ? <p className="small muted" style={{ marginTop: 8 }}>{vaultNotice}</p> : null}
         {connectError ? (
           <div className="warnbox small" style={{ marginTop: 10 }}>
             {connectError}

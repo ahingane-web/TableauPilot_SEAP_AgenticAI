@@ -1,7 +1,83 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-09-30.
+> Newest entries at the top of the change log. Last updated: 2026-10-01.
+
+## Feature: Vault UX restore — Published/Build + Save/Use (newest first)
+
+- **2026-10-01 — Docs sweep to match Vault header + Published/Build UX.** `PROJECT_OVERVIEW.md`,
+  `README.md`, `prd.md`, `security.md`, `python-dependency-decision.md`, and the
+  architecture/design/authentication/phases entries already in this feature now agree:
+  Vault body hidden by default with **Show Vault** in the panel header; connector
+  **Save Creds in Vault** / **Use Saved Creds** on connect forms; published datasources
+  filtered to the selected project folder. Hyper sidecar non-goal is all extract
+  connectors (not Salesforce-only). Suite still **297**.
+
+- **2026-10-01 — Vault body hidden by default; Show Vault in the panel header.**
+  After Tableau credentials are saved, `showVault` defaults to false. The Vault card
+  header stays mounted with a ghost **Show Vault** / **Hide Vault** button on the right
+  (not the top bar). Sections expand only when shown. If Tableau credentials are missing,
+  the body auto-opens so the PAT form remains reachable. Suite still **297**.
+
+- **2026-10-01 — Connector Save/Use on connect forms; Vault is summaries + Hide/Show.**
+  Connect & lock stays Unlock → Connect Tableau Cloud → target project folder →
+  **Use Published datasource** (list filtered to that folder) or **Build datasource**
+  (picker default **Select the connector**) → lock. Salesforce / BigQuery / Data Cloud /
+  Snowflake login fields stay visible; **Save Creds in Vault** and **Use Saved Creds**
+  sit next to Connect (Excel unchanged). Use Saved prefills non-secret summary fields
+  then connect/oauth with an empty body so the server merges vault secrets; passwords
+  never return to the browser. BigQuery OAuth client id/secret are back on Sign in
+  (Save stores the client only). Whole Vault panel **Hide vault** / **Show vault**
+  (`showVault`, default shown). `CredentialsPanel` keeps Tableau save/edit/delete and
+  compact connector summaries + PIN delete. No connector-client or publish-logic
+  changes. Suite still **297**.
+
+## Feature: Vault connector sections + picker (newest first)
+
+- **2026-10-01 — Vault sections for every connector except Excel; picker has no default.**
+  Left-top Vault is collapsible Tableau / Salesforce / BigQuery / Data Cloud / Snowflake.
+  Login materials merge into the existing PIN blob (`TableauCredentials.{salesforce,
+  dataCloud,snowflake,bigQueryOAuth}`); live session tokens stay transient. Connect/oauth/
+  publish routes fill omitted secrets from the vault without changing connector clients.
+  Build datasource dropdown starts at **Select the connector**. Tests +6
+  (`vaultFlow.test.ts` connector suite); suite **297** (295 in-sandbox; 2 real-Hyper
+  unsandboxed).
+
+## Feature: Vault left-top edit/delete (newest first)
+
+- **2026-10-01 — Left-top Vault panel: save, PIN-gated edit, PIN-gated delete.** After
+  unlock/register the SPA always shows `CredentialsPanel` titled **Vault** at the top of
+  the left column (`App.tsx`: Setup/Plan only when `hasCredentials`). Delete is
+  `VaultService.deleteCredentials` + `POST /api/vault/credentials/delete` (PIN via
+  `verifyPinOrThrow`); encrypted blob + live Tableau auth + `session.connectors` + flow
+  are cleared, vault username/PIN remain, session stays unlocked. `ConnectionPanel` is
+  identity-only. Tests +3 (`vaultFlow.test.ts` delete suite); expected **291** (289
+  in-sandbox; 2 real-Hyper unsandboxed).
+
+## Feature: Salesforce Data Cloud OAuth (a360 HTTP 500 fix) (newest first)
+
+- **2026-10-01 — Data Cloud sign-in UI matches BigQuery help pattern.** My Domain URL
+  starts empty (placeholder + tooltip; no default host). Setup steps (My Domain, Connected
+  App, callback, `api`/`cdp_query_api`, `OAUTH_APPROVAL_ERROR_GENERIC`) are a collapsible
+  “How do I connect Salesforce Data Cloud?” dropdown. Suite still **288**.
+
+- **2026-10-01 — Data Cloud OAuth: minimum scopes + popup display.**
+  `OAUTH_APPROVAL_ERROR_GENERIC` on `login.salesforce.com` was from requesting
+  `refresh_token` / `cdp_profile_api` when the Connected App may not list them; a blank
+  My Domain page was from CRM `prompt=login` in a small popup. Authorize URL is now built
+  in `src/datacloud/oauth.ts` with `api cdp_query_api`, `display=popup`, no `prompt`.
+  Popup 900×800. UI defaults to My Domain and asks the user to be logged into Salesforce
+  in another tab first. Suite still **288**.
+
+- **2026-10-01 — Data Cloud sign-in is Salesforce browser OAuth with CDP scopes.** SOAP
+  session ids fail `POST /services/a360/token` on this Developer Edition (empty-body HTTP
+  500). `src/datacloud/oauth.ts` calls Salesforce `buildAuthorizeUrl` with
+  `api refresh_token cdp_query_api cdp_profile_api` (Salesforce `oauth.ts` internals
+  unchanged). Dedicated pending store; the existing Salesforce OAuth callback tries that
+  store first then CRM OAuth. UI: Sign in with Salesforce + Connected App key/secret
+  fields; SOAP password collapsed as fallback. Publish allows empty password when a CDP
+  session already exists. Tests +4 (`dataCloudOauth.test.ts`); suite **288** (286
+  in-sandbox; 2 real-Hyper unsandboxed).
 
 ## Feature: Snowflake connector (Build datasource) (newest first)
 

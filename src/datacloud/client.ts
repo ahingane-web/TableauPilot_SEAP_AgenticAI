@@ -3,7 +3,8 @@
  * external deps).
  *
  * This is the ONLY module that talks to Data Cloud. It:
- *   1. authenticates via the existing Salesforce SOAP `login` (imported, unmodified),
+ *   1. authenticates via Salesforce SOAP `login` (imported, unmodified) **or**
+ *      an OAuth session whose token includes CDP scopes (`connectWithOauthSession`),
  *   2. exchanges the core access token for a Data Cloud (CDP) token
  *      (`POST /services/a360/token`),
  *   3. lists data spaces and objects (DMO / DLO / Calculated Insights) and describes
@@ -173,9 +174,19 @@ export function classifyObject(entity: {
 /**
  * SOAP-login to Salesforce, then exchange the core token for a Data Cloud (CDP) token.
  * Returns both sessions so the caller can stash them on `session.connectors.datacloud`.
+ * SOAP session ids often fail the a360 exchange (HTTP 500); prefer
+ * {@link connectWithOauthSession} with a CDP-scoped OAuth token.
  */
 export async function connect(creds: SalesforceCredentials): Promise<DataCloudConnectResult> {
   const sfSession = await salesforceLogin(creds);
+  return connectWithOauthSession(sfSession);
+}
+
+/**
+ * Exchange an already-authenticated Salesforce session (OAuth access token with
+ * `cdp_query_api`, or a SOAP SID) for a Data Cloud CDP token. Does not call SOAP login.
+ */
+export async function connectWithOauthSession(sfSession: SalesforceSession): Promise<DataCloudConnectResult> {
   const cdp = await exchangeCdpToken(sfSession);
   log.info('Connected to Salesforce Data Cloud', {
     core: hostOf(sfSession.instanceUrl),
@@ -217,7 +228,7 @@ export async function exchangeCdpToken(
       'CONNECTOR_API',
       `Data Cloud token exchange failed (HTTP ${res.status}). ${hintFromBody(text)}`,
       {
-        hint: 'Confirm this Salesforce user has Data Cloud access, then reconnect.',
+        hint: 'SOAP session ids often fail this exchange. Sign in with Salesforce (OAuth with api + cdp_query_api) and retry.',
       },
     );
   }

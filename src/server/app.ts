@@ -120,7 +120,46 @@ function bigQueryOauthResultHtml(result: { ok: boolean; message?: string }): str
 </body></html>`;
 }
 
-/** Escape text for safe inclusion in the OAuth result HTML body. */
+/**
+ * Data Cloud OAuth result page. Same popup pattern as Salesforce, with `type: 'dc-oauth'`
+ * so the Data Cloud UI does not treat a CRM Salesforce callback as success.
+ */
+function dataCloudOauthResultHtml(result: { ok: boolean; message?: string; username?: string }): string {
+  const payload = JSON.stringify({
+    type: 'dc-oauth',
+    ok: result.ok,
+    message: result.message ?? '',
+    username: result.username ?? '',
+  });
+  const heading = result.ok ? 'Data Cloud connected' : 'Data Cloud sign-in failed';
+  const detail = result.ok
+    ? 'You can close this window and return to TableauPilot.'
+    : escapeHtml(result.message ?? 'Please try again.');
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${heading}</title></head>
+<body style="font-family:system-ui,sans-serif;padding:24px;color:#1a1a1a">
+<h3>${heading}</h3><p>${detail}</p>
+<script>
+  try { if (window.opener) window.opener.postMessage(${payload}, '*'); } catch (e) {}
+  setTimeout(function(){ window.close(); }, 800);
+</script>
+</body></html>`;
+}
+
+/** Error page for the shared Salesforce OAuth callback — notifies both CRM and Data Cloud popups. */
+function oauthCallbackErrorHtml(message: string): string {
+  const sf = JSON.stringify({ type: 'sf-oauth', ok: false, message });
+  const dc = JSON.stringify({ type: 'dc-oauth', ok: false, message });
+  const detail = escapeHtml(message);
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Sign-in failed</title></head>
+<body style="font-family:system-ui,sans-serif;padding:24px;color:#1a1a1a">
+<h3>Sign-in failed</h3><p>${detail}</p>
+<script>
+  try { if (window.opener) { window.opener.postMessage(${sf}, '*'); window.opener.postMessage(${dc}, '*'); } } catch (e) {}
+  setTimeout(function(){ window.close(); }, 800);
+</script>
+</body></html>`;
+}
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -150,6 +189,12 @@ function readCredentials(body: Partial<TableauCredentials>): TableauCredentials 
         }
       : undefined,
   };
+}
+
+function readPin(body: { pin?: string }, action: string): string {
+  const pin = String(body.pin ?? '');
+  if (!pin) throw new AppError('VALIDATION', `Your 6-digit PIN is required to ${action}.`);
+  return pin;
 }
 
 /** Non-secret snapshot of session flow context for the client. */
@@ -233,6 +278,115 @@ export function createApp(): Hono {
     return c.json({ saved: true, credentialSummary: summary });
   });
 
+  // Remove saved Tableau credentials — requires the PIN again. Vault identity remains.
+  app.post('/api/vault/credentials/delete', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string }>();
+    const pin = String(body.pin ?? '');
+    if (!pin) throw new AppError('VALIDATION', 'Your 6-digit PIN is required to delete credentials.');
+    VaultService.deleteCredentials(session, pin);
+    return c.json({ deleted: true, ...contextSnapshot(session) });
+  });
+
+  app.post('/api/vault/connectors/salesforce', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string; url?: string; username?: string; password?: string; token?: string }>();
+    const input = {
+      url: String(body.url ?? ''),
+      username: String(body.username ?? ''),
+      password: String(body.password ?? ''),
+      token: body.token ? String(body.token) : undefined,
+    };
+    const summary = body.pin
+      ? VaultService.updateSalesforceAccount(session, readPin(body, 'modify Salesforce credentials'), input)
+      : VaultService.saveSalesforceAccount(session, input);
+    return c.json({ saved: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/salesforce/delete', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string }>();
+    const summary = VaultService.deleteSalesforceAccount(session, readPin(body, 'delete Salesforce credentials'));
+    return c.json({ deleted: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/datacloud', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{
+      pin?: string;
+      url?: string;
+      clientId?: string;
+      clientSecret?: string;
+      username?: string;
+      password?: string;
+      token?: string;
+    }>();
+    const input = {
+      url: String(body.url ?? ''),
+      clientId: body.clientId ? String(body.clientId) : undefined,
+      clientSecret: body.clientSecret ? String(body.clientSecret) : undefined,
+      username: body.username ? String(body.username) : undefined,
+      password: body.password ? String(body.password) : undefined,
+      token: body.token ? String(body.token) : undefined,
+    };
+    const summary = body.pin
+      ? VaultService.updateDataCloudAccount(session, readPin(body, 'modify Data Cloud credentials'), input)
+      : VaultService.saveDataCloudAccount(session, input);
+    return c.json({ saved: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/datacloud/delete', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string }>();
+    const summary = VaultService.deleteDataCloudAccount(session, readPin(body, 'delete Data Cloud credentials'));
+    return c.json({ deleted: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/snowflake', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{
+      pin?: string;
+      url?: string;
+      warehouse?: string;
+      username?: string;
+      password?: string;
+    }>();
+    const input = {
+      url: String(body.url ?? ''),
+      warehouse: String(body.warehouse ?? ''),
+      username: String(body.username ?? ''),
+      password: String(body.password ?? ''),
+    };
+    const summary = body.pin
+      ? VaultService.updateSnowflakeAccount(session, readPin(body, 'modify Snowflake credentials'), input)
+      : VaultService.saveSnowflakeAccount(session, input);
+    return c.json({ saved: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/snowflake/delete', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string }>();
+    const summary = VaultService.deleteSnowflakeAccount(session, readPin(body, 'delete Snowflake credentials'));
+    return c.json({ deleted: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/bigquery', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string; clientId?: string; clientSecret?: string }>();
+    const input = { clientId: String(body.clientId ?? ''), clientSecret: body.clientSecret ? String(body.clientSecret) : undefined };
+    const summary = body.pin
+      ? VaultService.updateBigQueryOAuthClient(session, readPin(body, 'modify BigQuery credentials'), input)
+      : VaultService.saveBigQueryOAuthClient(session, input);
+    return c.json({ saved: true, credentialSummary: summary });
+  });
+
+  app.post('/api/vault/connectors/bigquery/delete', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ pin?: string }>();
+    const summary = VaultService.deleteBigQueryOAuthClient(session, readPin(body, 'delete BigQuery credentials'));
+    return c.json({ deleted: true, credentialSummary: summary });
+  });
+
   // ------------------------------------------------------------- Tableau
   app.post('/api/tableau/connect', async (c) => {
     const session = requireSession(c);
@@ -304,7 +458,9 @@ export function createApp(): Hono {
     const oauthConfigured = Boolean(sf.oauthClientId);
     const bqOauthConfigured = Boolean(bq.oauthClientId);
     const items = TableauService.listConnectors().map((it) => {
-      if (it.id === 'salesforce') return { ...it, oauthRedirectUri: sf.oauthRedirectUri, oauthConfigured };
+      if (it.id === 'salesforce' || it.id === 'datacloud') {
+        return { ...it, oauthRedirectUri: sf.oauthRedirectUri, oauthConfigured };
+      }
       if (it.id === 'bigquery')
         return { ...it, oauthRedirectUri: bq.oauthRedirectUri, oauthConfigured: bqOauthConfigured };
       return it;
@@ -314,7 +470,13 @@ export function createApp(): Hono {
 
   app.post('/api/connectors/salesforce/connect', async (c) => {
     const session = requireSession(c);
-    const parsed = SalesforceCredentialsSchema.safeParse(await c.req.json());
+    const body = (await c.req.json().catch(() => ({}))) as Partial<{
+      url: string;
+      username: string;
+      password: string;
+      token?: string;
+    }>;
+    const parsed = SalesforceCredentialsSchema.safeParse(VaultService.mergeSalesforceLogin(session, body));
     if (!parsed.success) {
       throw new AppError('VALIDATION', 'Salesforce url, username, and password are required.', {
         details: { issues: zodIssues(parsed.error) },
@@ -353,11 +515,13 @@ export function createApp(): Hono {
     try {
       if (oauthError) throw new AppError('AUTH_FAILED', `Salesforce sign-in was cancelled or failed: ${oauthError}`);
       if (!code || !state) throw new AppError('VALIDATION', 'Missing OAuth code/state from Salesforce.');
+      const dc = await TableauService.completeDataCloudOauth({ code, state });
+      if (dc) return c.html(dataCloudOauthResultHtml({ ok: true, username: dc.username }));
       await TableauService.completeSalesforceOauth({ code, state });
       return c.html(oauthResultHtml({ ok: true }));
     } catch (err) {
       const safe = sanitizeError(err);
-      return c.html(oauthResultHtml({ ok: false, message: safe.message }), safe.status as 400);
+      return c.html(oauthCallbackErrorHtml(safe.message), safe.status as 400);
     }
   });
 
@@ -401,8 +565,12 @@ export function createApp(): Hono {
         : [];
     // Salesforce credentials are used ONLY to read the object schema (describe); they are
     // never embedded in the published datasource (publishing uses the saved credential).
+    const credsBody =
+      raw.credentials && typeof raw.credentials === 'object'
+        ? (raw.credentials as Partial<{ url: string; username: string; password: string; token?: string }>)
+        : {};
     const parsed = SalesforceBuildSchema.safeParse({
-      credentials: raw.credentials,
+      credentials: VaultService.mergeSalesforceLogin(session, credsBody),
       tables,
       relationships: Array.isArray(raw.relationships) ? raw.relationships : [],
       ...(raw.mode !== undefined ? { mode: raw.mode } : {}),
@@ -667,13 +835,39 @@ export function createApp(): Hono {
   });
 
   // ------------------------------------------------------------- Salesforce Data Cloud connector
-  // Additive fourth "Build datasource" entry: SOAP login + CDP token, then Data Space →
-  // object category → model objects → LIVE or EXTRACT datasource. Salesforce/Excel/BigQuery
-  // routes are untouched.
+  // Additive fourth "Build datasource" entry: OAuth (CDP scopes) or SOAP login + CDP token,
+  // then Data Space → object category → model objects → LIVE or EXTRACT datasource.
+  // Salesforce/Excel/BigQuery routes are untouched besides the shared OAuth callback
+  // trying the Data Cloud pending store first (same Connected App redirect URI).
+
+  app.post('/api/connectors/datacloud/oauth/start', async (c) => {
+    const session = requireSession(c);
+    const body = await c.req.json<{ url?: string; clientId?: string; clientSecret?: string }>().catch(() => ({}));
+    const merged = VaultService.mergeDataCloudLogin(session, body);
+    if (!merged.url) throw new AppError('VALIDATION', 'A Salesforce login URL is required.');
+    const { authUrl, redirectUri } = TableauService.dataCloudOauthStart(session, {
+      url: merged.url,
+      clientId: merged.clientId,
+      clientSecret: merged.clientSecret,
+    });
+    return c.json({ authUrl, redirectUri });
+  });
 
   app.post('/api/connectors/datacloud/connect', async (c) => {
     const session = requireSession(c);
-    const parsed = SalesforceCredentialsSchema.safeParse(await c.req.json());
+    const body = (await c.req.json().catch(() => ({}))) as Partial<{
+      url: string;
+      username: string;
+      password: string;
+      token?: string;
+    }>;
+    const merged = VaultService.mergeDataCloudLogin(session, body);
+    const parsed = SalesforceCredentialsSchema.safeParse({
+      url: merged.url,
+      username: merged.username ?? '',
+      password: merged.password ?? '',
+      token: merged.token,
+    });
     if (!parsed.success) {
       throw new AppError('VALIDATION', 'Salesforce url, username, and password are required.', {
         details: { issues: zodIssues(parsed.error) },
@@ -728,8 +922,18 @@ export function createApp(): Hono {
       datasourceName?: string;
       overwrite?: boolean;
     }>();
+    const dcCreds =
+      raw.credentials && typeof raw.credentials === 'object'
+        ? (raw.credentials as Partial<{ url: string; username: string; password?: string; token?: string }>)
+        : {};
+    const mergedDc = VaultService.mergeDataCloudLogin(session, dcCreds);
     const parsed = DataCloudBuildSchema.safeParse({
-      credentials: raw.credentials,
+      credentials: {
+        url: mergedDc.url,
+        username: mergedDc.username ?? '',
+        password: mergedDc.password,
+        token: mergedDc.token,
+      },
       dataSpace: raw.dataSpace,
       category: raw.category,
       tables: Array.isArray(raw.tables) ? raw.tables : [],
@@ -772,7 +976,13 @@ export function createApp(): Hono {
 
   app.post('/api/connectors/snowflake/connect', async (c) => {
     const session = requireSession(c);
-    const parsed = SnowflakeCredentialsSchema.safeParse(await c.req.json());
+    const body = (await c.req.json().catch(() => ({}))) as Partial<{
+      url: string;
+      warehouse: string;
+      username: string;
+      password: string;
+    }>;
+    const parsed = SnowflakeCredentialsSchema.safeParse(VaultService.mergeSnowflakeLogin(session, body));
     if (!parsed.success) {
       throw new AppError('VALIDATION', 'Snowflake server URL, warehouse, username, and password are required.', {
         details: { issues: zodIssues(parsed.error) },
@@ -846,8 +1056,12 @@ export function createApp(): Hono {
       datasourceName?: string;
       overwrite?: boolean;
     }>();
+    const snCreds =
+      raw.credentials && typeof raw.credentials === 'object'
+        ? (raw.credentials as Partial<{ url: string; warehouse: string; username: string; password: string }>)
+        : {};
     const parsed = SnowflakeBuildSchema.safeParse({
-      credentials: raw.credentials,
+      credentials: VaultService.mergeSnowflakeLogin(session, snCreds),
       warehouse: raw.warehouse,
       database: raw.database,
       schema: raw.schema,

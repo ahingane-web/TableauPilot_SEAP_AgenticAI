@@ -164,7 +164,7 @@ flowchart TB
     Pick -->|Salesforce| SFconn["connect - list objects"]
     Pick -->|Excel| XLupload["upload .xlsx - parse sheets"]
     Pick -->|BigQuery| BQoauth["Google OAuth - project / dataset"]
-    Pick -->|Data Cloud| DCconn["SOAP + CDP - data space / objects"]
+    Pick -->|Data Cloud| DCconn["OAuth CDP + a360 - data space / objects"]
     Pick -->|Snowflake| SFwh["session login - warehouse / database / schema"]
     SFconn --> Model["DataModelBuilder - relationships or joins"]
     XLupload --> Model

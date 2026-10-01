@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-09-30.
+> decisions change. Last updated: 2026-10-01.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -56,7 +56,7 @@ Mastra instance (src/mastra) ── `mastra dev` ──► Mastra Studio
 | **salesforce** | `salesforce/*` | Salesforce connectivity: SOAP `login` + REST `describe`/`query` + API-version auto-discovery (`client.ts`); browser OAuth PKCE (`oauth.ts`, `oauthStore.ts`). Session state is transient (in-memory). |
 | **excel** | `excel/*` | Excel workbook parse (`excelClient.ts`, `exceljs`). Transient upload on the session. Does not talk to Tableau. |
 | **bigquery** | `bigquery/*` | Google BigQuery: browser OAuth PKCE + BigQuery/Cloud Resource Manager REST (`client.ts`, `oauth.ts`, `oauthStore.ts`). Session state is transient. Does not talk to Tableau. |
-| **datacloud** | `datacloud/*` | Salesforce Data Cloud (Genie) connectivity: imports Salesforce SOAP `login` (unmodified), CDP token exchange, data spaces, metadata, Query API (`client.ts`). Session state is transient (in-memory). Does not talk to Tableau. |
+| **datacloud** | `datacloud/*` | Salesforce Data Cloud (Genie): OAuth wrapper with CDP scopes (`oauth.ts`, `oauthStore.ts`), SOAP `login` import (unmodified) as fallback, CDP token exchange, data spaces, metadata, Query API (`client.ts`). Session state is transient. Does not talk to Tableau. |
 | **snowflake** | `snowflake/*` | Snowflake connectivity: session login + SHOW/DESCRIBE/SELECT (`client.ts`). Session token + password are transient (in-memory). Does not talk to Tableau. |
 | **hyper sidecar** | `scripts/hyper/build_tdsx.py` | Python Hyper API script (only Python in the repo) that writes a `.hyper` and zips it with the `.tds` into a `.tdsx`; invoked as a subprocess by `tableau/publishing/hyperPackager.ts`. |
 | **validation** | `validation/{fieldValidation,guards}.ts` | Field validation vs live metadata; deterministic guards (lock/project/approval). |
@@ -72,9 +72,16 @@ Mastra instance (src/mastra) ── `mastra dev` ──► Mastra Studio
 | **server** | `server/*` | Hono BFF exposing `/api/*`; bootstrap + prod SPA serving. |
 
 Frontend (`app/`): `App.tsx` orchestrator; `api.ts` typed client (stores only session
-id); components `ConnectionPanel`, `CredentialsPanel`, `SetupPanel` (Build-datasource
-switch: Salesforce / Excel / BigQuery / Data Cloud / Snowflake), `PlanPanel`,
-`AuthoringPanel`, `common`.
+id); components `ConnectionPanel` (register/unlock only), `CredentialsPanel` (left-top
+**Vault**: Tableau save/edit/delete plus compact Salesforce / BigQuery / Data Cloud /
+Snowflake summaries — no Excel), `SetupPanel` (**Use Published datasource** |
+**Build datasource**; published list filtered to the selected project folder; Build
+picker defaults to **Select the connector**), `PlanPanel`, `AuthoringPanel`, `common`.
+After unlock, the Vault header stays mounted with **Show Vault** / **Hide Vault** in
+the panel (body hidden by default once Tableau credentials exist; auto-opens if they
+do not). Setup/Plan appear only once `hasCredentials` is true. Connector connect forms stay
+visible; **Save Creds in Vault** / **Use Saved Creds** post to existing vault APIs
+(empty/partial connect bodies still merge secrets server-side).
 
 ## 3. Data flow — the main path (`dashboardCreationWorkflow`)
 
@@ -170,12 +177,13 @@ holds data queried at publish time).
 The fourth connector plugs into the SAME pluggable "Build datasource" flow (shared
 `DataModelBuilder`) with a **Live/Extract** choice. Data Cloud objects (DMO / DLO /
 Calculated Insights) in a selected **data space** play the role Salesforce objects play.
-Authentication is the same **username/password SOAP login** as CRM Salesforce (imported,
-unmodified), then a CDP token exchange; tokens are held only on
-`session.connectors.datacloud` (in-memory).
+Authentication is **Salesforce browser OAuth with CDP scopes** (preferred; SOAP
+username/password is a fallback). SOAP session ids often fail the a360 exchange
+(HTTP 500). Tokens are held only on `session.connectors.datacloud` (in-memory).
 
 ```
-SOAP login (imported Salesforce.login)  →  CDP token POST /services/a360/token
+OAuth (api + cdp_query_api)  [or SOAP login fallback]
+  →  CDP token POST /services/a360/token
   → list data spaces  →  pick category (DMO / DLO / CI / All)  →  list objects
   → user models OBJECTS in the shared DataModelBuilder (mode + relationships/joins)
   → describe each object (Data Cloud metadata)  [+ for EXTRACT: Query API rows]
