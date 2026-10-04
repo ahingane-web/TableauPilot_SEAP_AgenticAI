@@ -2,7 +2,7 @@
 
 > A plain-language onboarding guide that ties together the README and the `docs/*`
 > set. For binding invariants and deep detail, always defer to the authoritative docs
-> linked at the bottom. Last updated: 2026-10-01.
+> linked at the bottom. Last updated: 2026-10-04.
 
 ## What this project is
 
@@ -170,7 +170,7 @@ sequenceDiagram
 
 Step-by-step, tied to the code:
 
-1. **Unlock the vault** (`app/components/ConnectionPanel.tsx` → `POST /api/vault/unlock`).
+1. **Unlock the vault** (`app/components/LoginView.tsx` → `POST /api/vault/unlock`).
    The PIN derives the AES key (`src/vault`), decrypts your Tableau credentials into an
    in-memory session, and returns only an opaque `sessionId`. The left-top **Vault**
    header (`CredentialsPanel.tsx`) stays mounted with **Show Vault** / **Hide Vault**

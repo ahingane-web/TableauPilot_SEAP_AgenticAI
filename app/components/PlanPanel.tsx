@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { api } from '../api';
 import type { CreationResult, FitMode, PlanningResult, ReferenceLineView, SessionContext, WorksheetSpecView } from '../types';
-import { Busy, ErrorPanel, Collapsible } from './common';
+import { Busy, ErrorPanel, Collapsible, StepHeader } from './common';
+import { Document } from './icons';
 
 /**
  * Natural-language request -> plan preview -> human approval -> execute -> verify.
@@ -144,7 +145,13 @@ export function PlanPanel({
 
   return (
     <div className="panel">
-      <h2>Describe your dashboard</h2>
+      <StepHeader
+        step={3}
+        title="Describe Your Dashboard"
+        icon={<Document size={18} />}
+        state={ready ? 'active' : 'idle'}
+        subtitle="Tell the agent what to build"
+      />
       {!ready ? (
         <p className="hint">Connect, select a target project, and lock a datasource first.</p>
       ) : (
@@ -155,7 +162,7 @@ export function PlanPanel({
             onChange={(e) => setRequest(e.target.value)}
           />
           <div className="row" style={{ marginTop: 8 }}>
-            <button onClick={generate} disabled={busy === 'plan' || !request.trim()}>
+            <button className="ai" onClick={generate} disabled={busy === 'plan' || !request.trim()}>
               {busy === 'plan' ? <Busy label="Planning…" /> : 'Generate plan'}
             </button>
           </div>

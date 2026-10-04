@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import type { CredentialSummary, DatasourceMetadataView, NamedItem, SessionContext } from '../types';
-import { Busy, ErrorPanel, Collapsible } from './common';
+import { Busy, ErrorPanel, Collapsible, StepHeader } from './common';
+import { Database, CheckCircle } from './icons';
 import { DataModelBuilder, type DataModel } from './DataModelBuilder';
 import { ExcelBuild } from './ExcelBuild';
 import { BigQueryBuild } from './BigQueryBuild';
@@ -247,7 +248,21 @@ export function SetupPanel({
 
   return (
     <div className="panel">
-      <h2>Connection & datasource</h2>
+      <StepHeader
+        step={2}
+        title="Connection & Datasource"
+        icon={<Database size={18} />}
+        state={ctx.datasourceLock ? 'done' : ctx.connected ? 'active' : 'idle'}
+        subtitle="Select a target project and lock a datasource"
+        status={
+          ctx.connected ? (
+            <span className="badge ok" style={{ flexShrink: 0 }}>
+              <CheckCircle size={14} />
+              Connected
+            </span>
+          ) : null
+        }
+      />
       {!ctx.connected ? (
         <div className="row">
           <button onClick={connect} disabled={busy === 'connect'}>
@@ -256,7 +271,6 @@ export function SetupPanel({
         </div>
       ) : (
         <div className="col">
-          <div className="badge ok" style={{ alignSelf: 'flex-start' }}>Connected</div>
 
           <div>
             <label>Target project (publishing destination)</label>

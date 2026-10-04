@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-10-01.
+> decisions change. Last updated: 2026-10-04.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -72,11 +72,15 @@ Mastra instance (src/mastra) ── `mastra dev` ──► Mastra Studio
 | **server** | `server/*` | Hono BFF exposing `/api/*`; bootstrap + prod SPA serving. |
 
 Frontend (`app/`): `App.tsx` orchestrator; `api.ts` typed client (stores only session
-id); components `ConnectionPanel` (register/unlock only), `CredentialsPanel` (left-top
-**Vault**: Tableau save/edit/delete plus compact Salesforce / BigQuery / Data Cloud /
-Snowflake summaries — no Excel), `SetupPanel` (**Use Published datasource** |
+id); components `LoginView` (full-screen two-column register/unlock screen rendered while
+locked — form card + marketing hero; replaces the old `ConnectionPanel`), `CredentialsPanel`
+(left-top **Vault**: Tableau save/edit/delete plus compact Salesforce / BigQuery / Data
+Cloud / Snowflake summaries — no Excel), `SetupPanel` (**Use Published datasource** |
 **Build datasource**; published list filtered to the selected project folder; Build
-picker defaults to **Select the connector**), `PlanPanel`, `AuthoringPanel`, `common`.
+picker defaults to **Select the connector**), `PlanPanel`, `AuthoringPanel`, `common`
+(incl. `StepHeader`), plus `icons.tsx` (inline-SVG icon set, no icon-lib dependency).
+The UI shell is CSS-variable-themed via `styles.css` `:root` tokens (presentation only —
+no connector or dashboard-creation logic depends on it).
 After unlock, the Vault header stays mounted with **Show Vault** / **Hide Vault** in
 the panel (body hidden by default once Tableau credentials exist; auto-opens if they
 do not). Setup/Plan appear only once `hasCredentials` is true. Connector connect forms stay

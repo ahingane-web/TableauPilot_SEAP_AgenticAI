@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import type { EmbedInfo, SessionContext } from '../types';
 import { Busy } from './common';
+import { BarChart, ExternalLink, EmptyDashboard } from './icons';
 
 /**
  * READ-ONLY published dashboard viewer.
@@ -127,18 +128,20 @@ export function PublishedViewPanel({ ctx }: { ctx: SessionContext }): React.Reac
   return (
     <>
       <div className="embed-header">
-        <strong style={{ color: 'var(--text)' }}>Published dashboard</strong>
+        <span className="ic"><BarChart size={18} /></span>
+        <strong style={{ color: 'var(--text)' }}>Published Dashboard</strong>
         {info ? (
           info.requiresInteractiveLogin ? (
-            <span className="badge warn">interactive login</span>
+            <span className="badge warn"><span className="statusdot" />interactive login</span>
           ) : info.token ? (
-            <span className="badge ok">connected app</span>
+            <span className="badge ok"><span className="statusdot" />connected app</span>
           ) : null
         ) : null}
         <div className="spacer" style={{ flex: 1 }} />
         {info?.src ? (
-          <a href={info.src} target="_blank" rel="noreferrer" className="small" style={{ marginRight: 8 }}>
-            Open in new tab ↗
+          <a href={info.src} target="_blank" rel="noreferrer" className="button secondary" style={{ textDecoration: 'none', marginRight: 8 }}>
+            <ExternalLink size={15} />
+            Open in Tableau
           </a>
         ) : null}
         {hasWorkbook ? (
@@ -200,7 +203,14 @@ export function PublishedViewPanel({ ctx }: { ctx: SessionContext }): React.Reac
       <div className="embed-body">
         {!hasWorkbook ? (
           <div className="embed-empty">
-            <p>Create &amp; publish a dashboard to view it here (read-only).</p>
+            <div className="empty-state">
+              <EmptyDashboard className="illus" />
+              <div className="h">Create &amp; publish a dashboard to view it here</div>
+              <div className="p">
+                Complete the steps on the left to connect to Tableau, select a project and datasource,
+                and describe your dashboard. The published dashboard will appear here in read-only mode.
+              </div>
+            </div>
           </div>
         ) : (
           <>

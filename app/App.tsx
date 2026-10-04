@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { api, getSessionId } from './api';
 import type { CreationResult, SessionContext } from './types';
-import { ConnectionPanel } from './components/ConnectionPanel';
+import { LoginView } from './components/LoginView';
 import { CredentialsPanel } from './components/CredentialsPanel';
 import { SetupPanel } from './components/SetupPanel';
 import { PlanPanel } from './components/PlanPanel';
 import { PublishedViewPanel } from './components/PublishedViewPanel';
+import { LogoMark, User, Lock } from './components/icons';
 
 /**
  * TableauPilot AI — two-pane copilot.
@@ -88,89 +89,103 @@ export function App(): React.ReactElement {
   return (
     <div className="app">
       <div className="topbar">
-        <h1>TableauPilot AI</h1>
-        <div className="steps" style={{ margin: 0 }}>
-          <span className={`step ${step === 0 ? 'active' : step > 0 ? 'done' : ''}`}>Vault</span>
-          <span className={`step ${step === 1 ? 'active' : step > 1 ? 'done' : ''}`}>Connect & lock</span>
-          <span className={`step ${step === 2 ? 'active' : step > 2 ? 'done' : ''}`}>Plan & create</span>
-          <span className={`step ${step === 3 ? 'active' : ''}`}>View</span>
+        <div className="brand">
+          <span className="mark"><LogoMark size={26} /></span>
+          <span className="name">TableauPilot AI</span>
+        </div>
+        <div className="nav" role="tablist" aria-label="Workflow">
+          <button type="button" className={`tab ${step === 0 ? 'active' : step > 0 ? 'done' : ''}`}>Vault</button>
+          <button type="button" className={`tab ${step === 1 ? 'active' : step > 1 ? 'done' : ''}`}>Connect & Lock</button>
+          <button type="button" className={`tab ${step === 2 ? 'active' : step > 2 ? 'done' : ''}`}>Plan & Create</button>
+          <button type="button" className={`tab ${step === 3 ? 'active' : ''}`}>View</button>
         </div>
         <div className="spacer" />
         {ctx ? (
           <>
-            <span className="badge">{ctx.username}</span>
-            <span className={`badge ${ctx.connected ? 'ok' : 'off'}`}>{ctx.connected ? 'Tableau connected' : 'not connected'}</span>
+            <span className="userchip">
+              <span className="av"><User size={14} /></span>
+              {ctx.username}
+            </span>
+            <span className={`badge ${ctx.connected ? 'ok' : 'off'}`}>
+              <span className="statusdot" />
+              {ctx.connected ? 'Tableau connected' : 'not connected'}
+            </span>
             <button className="ghost" onClick={() => setShowDashboard((v) => !v)}>
               {showDashboard ? 'Hide dashboard' : 'Show dashboard'}
             </button>
-            <button className="ghost" onClick={logout}>
+            <button onClick={logout}>
+              <Lock size={15} />
               Lock vault
             </button>
           </>
         ) : (
-          <span className="badge off">locked</span>
+          <span className="badge off">
+            <span className="statusdot" />
+            locked
+          </span>
         )}
       </div>
 
-      <div className="layout" ref={layoutRef}>
-        <div
-          className="left"
-          style={
-            !showDashboard
-              ? { width: '100%', minWidth: 0 }
-              : leftWidth != null
-                ? { width: leftWidth, minWidth: 0 }
-                : undefined
-          }
-        >
-          {booting ? (
+      {booting ? (
+        <div className="layout">
+          <div className="left">
             <div className="panel">Loading…</div>
-          ) : !ctx ? (
-            <ConnectionPanel onReady={setCtx} />
-          ) : (
-            <>
-              <CredentialsPanel
-                ctx={ctx}
-                onChange={setCtx}
-                vaultNonce={vaultNonce}
-                onVaultChange={() => setVaultNonce((n) => n + 1)}
-                expanded={showVault}
-                onToggle={() => setShowVault((v) => !v)}
-              />
-              {ctx.hasCredentials ? (
-                <>
-                  <SetupPanel
-                    ctx={ctx}
-                    onChange={setCtx}
-                    vaultNonce={vaultNonce}
-                    onVaultChange={() => setVaultNonce((n) => n + 1)}
-                  />
-                  <PlanPanel ctx={ctx} onChange={setCtx} onCreated={setLastResult} />
-                </>
-              ) : null}
-            </>
-          )}
+          </div>
         </div>
-        {showDashboard ? (
-          <>
-            <div
-              className={`gutter${dragging ? ' dragging' : ''}`}
-              onMouseDown={() => setDragging(true)}
-              onDoubleClick={() => setLeftWidth(null)}
-              role="separator"
-              aria-orientation="vertical"
-              title="Drag to resize — double-click to reset"
+      ) : !ctx ? (
+        // Locked: full-screen two-column login (unlock/register form + marketing hero).
+        <div className="layout">
+          <LoginView onReady={setCtx} />
+        </div>
+      ) : (
+        <div className="layout" ref={layoutRef}>
+          <div
+            className="left"
+            style={
+              !showDashboard
+                ? { width: '100%', minWidth: 0 }
+                : leftWidth != null
+                  ? { width: leftWidth, minWidth: 0 }
+                  : undefined
+            }
+          >
+            <CredentialsPanel
+              ctx={ctx}
+              onChange={setCtx}
+              vaultNonce={vaultNonce}
+              onVaultChange={() => setVaultNonce((n) => n + 1)}
+              expanded={showVault}
+              onToggle={() => setShowVault((v) => !v)}
             />
-            <div className="right">
-              {ctx ? (
+            {ctx.hasCredentials ? (
+              <>
+                <SetupPanel
+                  ctx={ctx}
+                  onChange={setCtx}
+                  vaultNonce={vaultNonce}
+                  onVaultChange={() => setVaultNonce((n) => n + 1)}
+                />
+                <PlanPanel ctx={ctx} onChange={setCtx} onCreated={setLastResult} />
+              </>
+            ) : null}
+          </div>
+          {showDashboard ? (
+            <>
+              <div
+                className={`gutter${dragging ? ' dragging' : ''}`}
+                onMouseDown={() => setDragging(true)}
+                onDoubleClick={() => setLeftWidth(null)}
+                role="separator"
+                aria-orientation="vertical"
+                title="Drag to resize — double-click to reset"
+              />
+              <div className="right">
                 <PublishedViewPanel ctx={ctx} key={lastResult?.workbookId ?? ctx.workbook?.workbookId ?? 'none'} />
-              ) : (
-                <div className="embed-empty">Unlock your vault to begin.</div>
-              )}
-            </div>
-          </>
-        ) : null}
-      </div>
+              </div>
+            </>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }

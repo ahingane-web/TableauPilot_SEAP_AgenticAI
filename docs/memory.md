@@ -1,7 +1,38 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-10-01.
+> Newest entries at the top of the change log. Last updated: 2026-10-04.
+
+## Feature: UI redesign — professional shell + full-screen Login (newest first)
+
+- **2026-10-04 — Presentation-only UI redesign (shell + login).** No `src/**`,
+  connector, or dashboard-creation logic changed; all edits are in `app/**` markup/CSS.
+  New global palette in `app/styles.css` `:root` (brand `#2563EB`, strong `#1D4FD7`,
+  navy `#172554`, ai `#7C3AED`, ok `#16A34A`, warn `#F59E0B`, danger `#E5484D`,
+  bg `#F5F7FB`, panel `#FFFFFF`, border `#D9E2F0`, text `#172033`, muted `#64748B`,
+  radius `12px`); tokens cascade to all components incl. `.sf-*` connector builders.
+  Added inline-SVG icon set `app/components/icons.tsx` (no icon-lib dependency; all use
+  `currentColor`): `LogoMark, Lock, Database, Document, User, Check, CheckCircle,
+  ExternalLink, BarChart, EmptyDashboard, Shield, Eye, EyeOff, Clock, Cloud, Sparkles,
+  UserPlus, Quote, HeroIllustration`. New `StepHeader` in `common.tsx` (numbered circle +
+  icon + title/subtitle + status/action; `state: active|done|idle`) now heads
+  `CredentialsPanel` (Vault), `SetupPanel` (Connection & Datasource), `PlanPanel`
+  (Describe Your Dashboard). `PublishedViewPanel` gets a `BarChart` header + **Open in
+  Tableau** link and an `EmptyDashboard` illustration empty-state. Topbar restyled with
+  `.brand` lockup, `.nav` segmented step tabs, `.userchip`, connected `.statusdot`, and a
+  Lock-icon **Lock vault** button. `button, .button` CSS generalized to style anchors too
+  (`.ai`/`.secondary`/`.ghost` variants). Suite still **297** (no behavior change).
+
+- **2026-10-04 — `ConnectionPanel.tsx` replaced by full-screen `LoginView.tsx`.** The
+  locked screen is now a two-column layout: left `.login-card` (lock tile + heading +
+  segmented Unlock/Register tabs + icon-prefixed Username + PIN field with Eye/EyeOff
+  toggle + full-width action + shield infobox + "Why use Vault?" footer) and right
+  `.login-hero` (badge + headline + `HeroIllustration` + 4 chip cards + testimonial).
+  `LoginView` reuses ConnectionPanel's exact identity logic verbatim (`mode/username/pin/
+  busy/error`; `api.register`/`api.unlock`/`api.session`), adding only a UI-only `showPin`
+  state. `App.tsx` renders it full-width while `!ctx` (no split), then the existing
+  left/right workflow once unlocked. Responsive: `@media (max-width: 1040px)` collapses to
+  one column and hides the hero. `ConnectionPanel.tsx` deleted (`git rm`).
 
 ## Feature: Vault UX restore — Published/Build + Save/Use (newest first)
 

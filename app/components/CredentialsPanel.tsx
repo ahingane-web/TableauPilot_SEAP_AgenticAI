@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api';
 import type { CredentialSummary, SessionContext } from '../types';
-import { Busy, Collapsible, ErrorPanel } from './common';
+import { Busy, Collapsible, ErrorPanel, StepHeader } from './common';
+import { Lock, CheckCircle } from './icons';
 
 type SectionKey = 'tableau' | 'salesforce' | 'bigquery' | 'datacloud' | 'snowflake';
 type SectionMode = 'view' | 'edit' | 'delete';
@@ -215,18 +216,31 @@ export function CredentialsPanel({
 
   return (
     <div className="panel">
-      <div className="row" style={{ alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <h2 style={{ margin: 0 }}>Vault</h2>
-          <p className="small muted" style={{ margin: '4px 0 0' }}>
+      <StepHeader
+        step={1}
+        title="Vault"
+        icon={<Lock size={18} />}
+        state={ctx.hasCredentials ? 'done' : 'active'}
+        subtitle={
+          <>
             Signed in as <strong>{ctx.username}</strong>
             {ctx.hasCredentials ? ' · Tableau credentials saved' : ' · save Tableau credentials to continue'}
-          </p>
-        </div>
-        <button type="button" className="ghost" onClick={onToggle} style={{ flexShrink: 0 }}>
-          {expanded ? 'Hide Vault' : 'Show Vault'}
-        </button>
-      </div>
+          </>
+        }
+        status={
+          ctx.hasCredentials ? (
+            <span className="badge ok" style={{ flexShrink: 0 }}>
+              <CheckCircle size={14} />
+              Saved
+            </span>
+          ) : null
+        }
+        action={
+          <button type="button" className="ghost" onClick={onToggle} style={{ flexShrink: 0 }}>
+            {expanded ? 'Hide Vault' : 'Show Vault'}
+          </button>
+        }
+      />
       {expanded ? (
         <div style={{ marginTop: 10 }}>
           <ErrorPanel error={error} onDismiss={() => setError(null)} />

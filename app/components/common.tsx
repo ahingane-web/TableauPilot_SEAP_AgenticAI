@@ -36,6 +36,45 @@ export function Section({ title, children }: { title: string; children: React.Re
   );
 }
 
+/**
+ * Numbered step-section header for the left workflow cards. Purely presentational: a circular
+ * step number (brand, or green when done, or idle/grey), an optional leading icon, the title
+ * with optional sub-text, and an optional right-aligned status/action area.
+ */
+export function StepHeader({
+  step,
+  title,
+  icon,
+  subtitle,
+  status,
+  action,
+  state = 'active',
+}: {
+  step: number;
+  title: string;
+  icon?: React.ReactNode;
+  subtitle?: React.ReactNode;
+  status?: React.ReactNode;
+  action?: React.ReactNode;
+  state?: 'active' | 'done' | 'idle';
+}): React.ReactElement {
+  return (
+    <div className="stephead">
+      <span className={`num ${state}`} aria-hidden>
+        {step}
+      </span>
+      {icon ? <span className="ic" aria-hidden>{icon}</span> : null}
+      <span>
+        <div className="ttl">{title}</div>
+        {subtitle ? <div className="sub">{subtitle}</div> : null}
+      </span>
+      <span className="grow" />
+      {status}
+      {action}
+    </div>
+  );
+}
+
 export function Busy({ label }: { label: string }): React.ReactElement {
   return (
     <span className="muted small">
