@@ -1,7 +1,7 @@
 # Architecture — TableauPilot AI
 
 > Living document. Update this whenever components, data flow, or key technical
-> decisions change. Last updated: 2026-10-04.
+> decisions change. Last updated: 2026-10-05.
 
 TableauPilot AI is a Mastra-orchestrated agentic copilot for Tableau Cloud Web
 Authoring. It follows a **hybrid authoring** strategy:
@@ -80,7 +80,11 @@ Cloud / Snowflake summaries — no Excel), `SetupPanel` (**Use Published datasou
 picker defaults to **Select the connector**), `PlanPanel`, `AuthoringPanel`, `common`
 (incl. `StepHeader`), plus `icons.tsx` (inline-SVG icon set, no icon-lib dependency).
 The UI shell is CSS-variable-themed via `styles.css` `:root` tokens (presentation only —
-no connector or dashboard-creation logic depends on it).
+no connector or dashboard-creation logic depends on it). A topbar **Dark/Light** toggle
+(`App.tsx`) sets `document.documentElement[data-theme]` and persists to
+`localStorage['tp-theme']` (default light); a `[data-theme="dark"]` block overrides the
+tokens (with `--tint`/`--shade` mix bases) so login + app, including `.sf-*` builders,
+retheme with no structural changes.
 After unlock, the Vault header stays mounted with **Show Vault** / **Hide Vault** in
 the panel (body hidden by default once Tableau credentials exist; auto-opens if they
 do not). Setup/Plan appear only once `hasCredentials` is true. Connector connect forms stay

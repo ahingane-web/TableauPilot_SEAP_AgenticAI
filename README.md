@@ -141,10 +141,11 @@ Join), then choose **Live** or **Extract**. Extract uses the Hyper sidecar and a
 refresh; Live publishes a bare `.tds`. Both embed the Snowflake username/password on the
 Tableau Cloud connection.
 
-**Interface** — a light, Tableau-themed two-pane layout: the AI workflow on the left and the
-read-only published dashboard on the right. Use **Hide/Show dashboard** in the top bar to
-collapse the preview and give the workflow full width, and the collapsible **Datasource
-fields** and **Sheets & dashboards** sections to keep things tidy. After edits you get clear
+**Interface** — a Tableau-themed two-pane layout: the AI workflow on the left and the
+read-only published dashboard on the right. A top-bar **Dark/Light** toggle switches the
+whole UI theme (default light; remembered across reloads). Use **Hide/Show dashboard** in the
+top bar to collapse the preview and give the workflow full width, and the collapsible
+**Datasource fields** and **Sheets & dashboards** sections to keep things tidy. After edits you get clear
 status messages — "Modifications done — waiting for approval to build" for a revised plan, and
 "Modification done and dashboard published successfully" after an in-place modify.
 

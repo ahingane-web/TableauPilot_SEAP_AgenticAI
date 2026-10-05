@@ -6,7 +6,9 @@ import { CredentialsPanel } from './components/CredentialsPanel';
 import { SetupPanel } from './components/SetupPanel';
 import { PlanPanel } from './components/PlanPanel';
 import { PublishedViewPanel } from './components/PublishedViewPanel';
-import { LogoMark, User, Lock } from './components/icons';
+import { LogoMark, User, Lock, Sun, Moon } from './components/icons';
+
+type Theme = 'light' | 'dark';
 
 /**
  * TableauPilot AI — two-pane copilot.
@@ -28,6 +30,22 @@ export function App(): React.ReactElement {
   const [showDashboard, setShowDashboard] = useState(true);
   const [showVault, setShowVault] = useState(false);
   const [vaultNonce, setVaultNonce] = useState(0);
+
+  // UI theme (presentation-only). Default Light; remembered across reloads. Applied to
+  // <html> so the whole shell — login + app, including the connector builders — rethemes.
+  const [theme, setTheme] = useState<Theme>(() => {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('tp-theme') : null;
+    return saved === 'dark' ? 'dark' : 'light';
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem('tp-theme', theme);
+    } catch {
+      /* storage unavailable — theme still applies for this session */
+    }
+  }, [theme]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -100,6 +118,16 @@ export function App(): React.ReactElement {
           <button type="button" className={`tab ${step === 3 ? 'active' : ''}`}>View</button>
         </div>
         <div className="spacer" />
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
+          aria-label={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+          title={theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'}
+        >
+          {theme === 'light' ? <Moon size={15} /> : <Sun size={15} />}
+          {theme === 'light' ? 'Dark' : 'Light'}
+        </button>
         {ctx ? (
           <>
             <span className="userchip">

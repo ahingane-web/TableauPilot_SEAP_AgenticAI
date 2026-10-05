@@ -275,3 +275,22 @@ export function EmptyDashboard({ className }: { className?: string }): React.Rea
     </svg>
   );
 }
+
+/** Sun — shown on the theme toggle when currently in dark mode (switch to light). */
+export function Sun({ size = 18, className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(size, className)}>
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2.5v2.5M12 19v2.5M4.6 4.6l1.8 1.8M17.6 17.6l1.8 1.8M2.5 12H5M19 12h2.5M4.6 19.4l1.8-1.8M17.6 6.4l1.8-1.8" />
+    </svg>
+  );
+}
+
+/** Moon — shown on the theme toggle when currently in light mode (switch to dark). */
+export function Moon({ size = 18, className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(size, className)}>
+      <path d="M20 14.5A8 8 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z" />
+    </svg>
+  );
+}

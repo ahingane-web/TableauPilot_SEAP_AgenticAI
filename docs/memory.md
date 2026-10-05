@@ -1,7 +1,28 @@
 # Memory — Living Progress Log
 
 > Append-only-ish running log of environment facts, status, decisions, and fixes.
-> Newest entries at the top of the change log. Last updated: 2026-10-04.
+> Newest entries at the top of the change log. Last updated: 2026-10-05.
+
+## Feature: Dark/Light theme toggle (newest first)
+
+- **2026-10-05 — Presentation-only Dark/Light theme switcher.** No `src/**`, connector,
+  dashboard-creation, or sizing changes — only `app/App.tsx`, `app/components/icons.tsx`,
+  `app/styles.css`. A `ghost` icon button in the always-visible topbar (placed right after
+  the spacer, so it shows on the login screen and the app) toggles theme; shows Moon+"Dark"
+  in light mode and Sun+"Light" in dark mode (new `Sun`/`Moon` inline-SVG icons). `App.tsx`
+  holds `theme: 'light'|'dark'` (default **light**), persists it to `localStorage['tp-theme']`,
+  and sets `document.documentElement[data-theme]` in a `useEffect`. Dark mode is a pure
+  token override: added `[data-theme="dark"]` block in `styles.css` (deep navy-black `--bg
+  #0A0E1A`, panels `#111827`/`#0F1729`, border `#1E293B`, light text `#E6EDF7`, muted
+  `#94A3B8`, `--navy` flips light, brighter brand/ai/ok, deeper `--shadow`). To avoid
+  light-tinted chips on dark panels, introduced mix-base tokens `--tint` (soft surfaces mix
+  toward this; `#fff` light / `var(--panel)` dark) and `--shade` (contrast text mixes toward
+  this; `#000` light / `#fff` dark), plus hero-gradient tokens `--hero-g1/--hero-g2` and a
+  dark `--warn-ink` for legible amber text; routed the ~20 hardcoded `#fff`/`#000`
+  `color-mix` surfaces, the input `background`, and the `.login-hero` gradient through them.
+  Every component (incl. `.sf-*` builders) reads the tokens, so login + app retheme with no
+  structural edits. tsc + lint clean; both themes verified via browser screenshots; choice
+  persists across reload. Suite count unchanged.
 
 ## Feature: UI redesign — professional shell + full-screen Login (newest first)
 
